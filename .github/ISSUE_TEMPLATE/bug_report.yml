@@ -1,6 +1,7 @@
 name: 🐛 缺陷报告
 description: 报告机器人的功能异常、误判或运行失败
 title: "[Bug] "
+labels: ["bug", "priority/P2"]
 body:
   - type: markdown
     attributes:

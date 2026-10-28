@@ -1,6 +1,7 @@
 name: ❓ 使用咨询
 description: 关于配置、部署或使用方式的疑问
 title: "[Question] "
+labels: ["question"]
 body:
   - type: markdown
     attributes:
