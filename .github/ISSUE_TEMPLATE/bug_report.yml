@@ -1,0 +1,56 @@
+name: 🐛 缺陷报告
+description: 报告机器人的功能异常、误判或运行失败
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请尽量提供可复现的信息，缺少关键步骤时可能会被要求补充。
+  - type: checkboxes
+    id: precheck
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索现有 Issue，未发现重复
+          required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 发生了什么？预期与实际表现分别是什么
+      placeholder: 描述现象、预期结果与实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 尽可能给出最小复现路径
+      placeholder: |
+        1. 配置 ...
+        2. 触发事件 ...
+        3. 观察到 ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境信息
+      placeholder: |
+        - 机器人版本 / commit：
+        - 运行方式（本地 / 容器 / CI）：
+        - Python 版本：
+        - 操作系统：
+        - 目标仓库与事件类型：
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志或截图
+      description: 请粘贴相关日志，注意脱敏（Token、内部链接、个人信息等）
+      render: shell
+  - type: textarea
+    id: additional
+    attributes:
+      label: 补充说明

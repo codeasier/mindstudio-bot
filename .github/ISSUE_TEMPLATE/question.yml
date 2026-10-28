@@ -1,0 +1,35 @@
+name: ❓ 使用咨询
+description: 关于配置、部署或使用方式的疑问
+title: "[Question] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提问前建议先阅读 README 与 `docs/` 下的文档。
+  - type: textarea
+    id: question
+    attributes:
+      label: 问题描述
+      description: 想达成什么目标？卡在哪一步？
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: 已尝试的方式
+      description: 做过哪些尝试？结果如何？
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境信息
+      placeholder: |
+        - 机器人版本 / commit：
+        - 运行方式（本地 / 容器 / CI）：
+        - Python 版本：
+        - 操作系统：
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志或截图
+      description: 注意脱敏（Token、内部链接、个人信息等）
+      render: shell
