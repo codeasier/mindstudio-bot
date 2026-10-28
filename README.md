@@ -26,6 +26,11 @@
 
 > 待补充。代码与工具链确定后，在此说明安装与运行方式。
 
+## 参与贡献
+
+- 开发者规范：[CONTRIBUTING.md](CONTRIBUTING.md)
+- 标签规范：[docs/labels.md](docs/labels.md)
+
 ## 待补充内容
 
 - [ ] 背景与要解决的问题
