@@ -16,16 +16,18 @@
 
 ## 功能范围
 
-仓内 `.msbot/config.yaml` 启用关闭审计并引用 Issue Forms YAML 模板。含 `bug` 标签的 Issue 被新增 `resolved` 时：
+被纳管 GitCode 仓库中的 `.msbot/config.yaml` 启用关闭审计并引用该仓库的 Issue Forms YAML 模板。含 `bug` 标签的 Issue 被新增 `resolved` 时：
 
 1. 完整读取评论，检查是否至少有一条单独符合关闭模板的登记。
 2. 合格则保留标签；不合格只移除 `resolved`，保留其他标签。
 3. 可选发送飞书机器人通知，支持自定义安全关键词和签名。
 4. 持久记录投递、审计、删标及通知结果，防止重复投递重复执行。
 
-模板及运行入口：
-- [仓库配置](.msbot/config.yaml)
-- [Bug 关闭模板](.msbot/template/bug-close.yml)
+本仓库的 `examples/managed-repo/` 提供被纳管仓库的接入样例；将其中的 `.msbot/` 放入目标仓库根目录。Bot 服务的实例配置参见 [examples/instance.yaml](examples/instance.yaml)，仓库配置与模板通过 GitCode 从被纳管仓库读取。
+
+示例及运行入口：
+- [被纳管仓库配置示例](examples/managed-repo/.msbot/config.yaml)
+- [Bug 关闭模板示例](examples/managed-repo/.msbot/template/bug-close.yml)
 - [关闭登记评论示例](examples/bug-close-comment.md)
 - [安装、接入、飞书和长期运行说明](docs/bug-close-audit.md)
 

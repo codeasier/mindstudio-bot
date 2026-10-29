@@ -2,9 +2,21 @@
 
 这是当前唯一实现的业务案例。Python 服务持续接收 GitCode Issue Hook；Go CLI 管理接入和查询；平台请求直接复用 `gitcode-cli` 服务层。
 
-## 1. 仓库侧配置
+## 1. 被纳管 GitCode 仓库配置
 
-将 [.msbot/config.yaml](../.msbot/config.yaml) 和 [.msbot/template/bug-close.yml](../.msbot/template/bug-close.yml) 放入被管理仓库的默认分支：
+本仓库在 `examples/managed-repo/` 提供接入样例。将其中的 [配置示例](../examples/managed-repo/.msbot/config.yaml) 和 [关闭模板示例](../examples/managed-repo/.msbot/template/bug-close.yml) 复制到被纳管 GitCode 仓库，并提交到其默认分支，目标路径为：
+
+```text
+<被纳管仓库>/
+└── .msbot/
+    ├── config.yaml
+    └── template/
+        └── bug-close.yml
+```
+
+Bot 服务使用[实例配置](../examples/instance.yaml)运行，通过 GitCode 读取被纳管仓库的配置和模板。`examples/managed-repo/` 仅用于分发接入样例，配置中的模板路径相对于被纳管仓库根目录。
+
+仓库配置示例：
 
 ```yaml
 version: 1
@@ -20,7 +32,7 @@ audits:
 
 ### 登记评论
 
-使用 [完整登记示例](../examples/bug-close-comment.md)，或从自定义模板生成空白登记：
+使用 [完整登记示例](../examples/bug-close-comment.md)，或在被纳管仓库的本地工作区从自定义模板生成空白登记：
 
 ```sh
 msbot-server render-template .msbot/template/bug-close.yml
@@ -178,9 +190,18 @@ sudo systemctl status msbot
 
 离线测试覆盖真实上游服务的 HTTP 请求、超过一页的评论、合法／缺失／错误选项评论、精确删标、重复投递、跨项目拒绝、鉴权、配置回退、重启恢复、飞书签名与错误响应，以及 Go CLI 接入回执。
 
-GitCode 官方 Issue Event 文档说明了 `changes`，但未提供标签更新的完整样本。当前实现严格识别 `changes.labels.previous/current`（元素为名称或含 name/title 的对象）；未知形状记录为 `unrecognized_label_change`，不凭当前 labels 推断添加动作。**部署验收需取得真实“添加 resolved”回调，核对该差异形状及密码／签名模式。**
+### 真实仓库验收（2026-10-29）
 
-本地测试不代表已经对真实仓库创建 Webhook、删除标签或发送真实飞书消息。
+已在 `codeasier/msinsight` 的 `master` 提交 `.msbot/`，由服务创建 Webhook（密码模式），并通过界面新增 `resolved` 取得真实回调：
+
+- 无登记评论：任务 `rejected`，删除 `resolved` 后读取确认，其他标签保留。
+- 有完整登记评论：任务 `passed`，保留 `resolved`。
+- 创建 Issue、关闭 Issue、未改标签的普通更新均被记录为 `ignored`，未触发审计。
+- 严格识别的 `changes.labels.previous/current` 与真实回调一致。
+
+平台行为差异：直接调用独立的标签子资源接口（`POST/DELETE /repos/{owner}/{repo}/issues/{n}/labels...`）不会触发 Issue Hook；通过界面标签选择器（关闭对话框时提交）或 `PATCH /repos/{owner}/{repo}/issues/{n}` 携带 `labels` 更新会触发，且当前实现能识别其 `changes.labels`。如用脚本批量改标签，必须走 Issue 更新接口，不能依赖标签子资源接口。
+
+本次真实验收覆盖密码模式和单页评论；签名模式、Feishu 发送、多页评论及配置回退尚未在真实平台验证。
 
 参考：
 - [GitCode Issue Event](https://docs.gitcode.com/docs/help/home/org_project/webhook/webhook-stepup/issue-events)

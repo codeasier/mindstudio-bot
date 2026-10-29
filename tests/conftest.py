@@ -10,9 +10,10 @@ from msbot.app import create_app
 from msbot.config import Settings
 
 ROOT = Path(__file__).resolve().parents[1]
-TEMPLATE = (ROOT / ".msbot/template/bug-close.yml").read_text(encoding="utf-8")
+MANAGED_REPO = ROOT / "examples/managed-repo"
+TEMPLATE = (MANAGED_REPO / ".msbot/template/bug-close.yml").read_text(encoding="utf-8")
 VALID_COMMENT = (ROOT / "examples/bug-close-comment.md").read_text(encoding="utf-8")
-CONFIG = (ROOT / ".msbot/config.yaml").read_text(encoding="utf-8")
+CONFIG = (MANAGED_REPO / ".msbot/config.yaml").read_text(encoding="utf-8")
 
 
 class FakePlatform:
