@@ -1,6 +1,6 @@
 # 贡献指南
 
-本文档说明本仓库的协作约定。技术栈尚未确定，凡是尚未落地的部分都明确标注为「待定」，不做臆测。
+本文档说明本仓库的协作约定。当前落地 Bug Issue 关闭审计案例：Python 服务端直接复用 gitcode-cli 服务层，Go CLI 调用管理 API。
 
 ## 可以贡献什么
 
@@ -55,8 +55,10 @@ docs(readme): 补充本地运行说明
 
 ## 代码与文档
 
-- 语言、格式化与静态检查工具尚未确定，确定后在本文档补充具体命令。
-- 在此之前请与现有代码风格保持一致，不引入未讨论的新依赖。
+- Python 3.11+，Go 1.22+；开发安装见[关闭审计使用说明](docs/bug-close-audit.md)。
+- Python 检查：`.venv/bin/python -m pytest`、`.venv/bin/python -m ruff check src tests`、`.venv/bin/python -m ruff format --check src tests`。
+- Go 检查：`go test ./...`、`go vet ./...`、`gofmt -d cmd/msbot`。
+- GitCode 平台路径、分页和通用服务缺项在上游补齐；本仓库不复制平台 REST 实现。
 - 文档以中文为主，专有名词保留英文原文；行为变更需同步更新 README 或 `docs/`。
 
 ## 标签
@@ -71,6 +73,6 @@ docs(readme): 补充本地运行说明
 ## 待补充
 
 - [ ] 行为准则（Code of Conduct）
-- [ ] 开发环境与依赖安装
-- [ ] 测试与静态检查命令
+- [x] 开发环境与依赖安装
+- [x] 测试与静态检查命令
 - [ ] 合并方式与发布流程

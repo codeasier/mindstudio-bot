@@ -1,0 +1,25 @@
+[Unit]
+Description=MindStudio Bot Bug Issue Close Audit
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=msbot
+Group=msbot
+WorkingDirectory=/opt/msbot/current
+EnvironmentFile=/etc/msbot/secrets.env
+ExecStart=/opt/msbot/current/.venv/bin/msbot-server serve --config /etc/msbot/instance.yaml
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=120
+StateDirectory=msbot
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,7 @@
+version: 1
+audits:
+  bug_issue_close:
+    enabled: true
+    template: .msbot/template/bug-close.yml
+    # 实例配置中存在该连接时再启用：
+    # notification: engineering

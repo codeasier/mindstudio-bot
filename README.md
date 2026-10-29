@@ -2,7 +2,7 @@
 
 > 面向 Ascend MindStudio 社区（GitCode）的 Issue / PR 自动化协作机器人。
 
-**项目状态**：初始化阶段。当前仓库除本文档外尚无代码，具体功能与实现方式仍在明确中。
+**当前实现**：Bug Issue 关闭审计案例。Python 服务端直接 import `codeasier/gitcode-cli` 服务层，Go CLI 管理仓库接入及结果查询；SQLite 持久队列支持长期值守。
 
 ---
 
@@ -16,15 +16,34 @@
 
 ## 功能范围
 
-> 以下仅为初步方向，尚未细化与确认。
+被纳管 GitCode 仓库中的 `.msbot/config.yaml` 启用关闭审计并引用该仓库的 Issue Forms YAML 模板。含 `bug` 标签的 Issue 被新增 `resolved` 时：
 
-- **Issue 相关**：分类与打标、信息补全与追问、相似问题关联、答复建议、状态流转等。
-- **PR 相关**：规范性检查、CI 失败信息汇总、变更摘要、审查辅助等。
-- **公共能力**：规则配置、动作记录与审计、人工确认与回滚等。
+1. 完整读取评论，检查是否至少有一条单独符合关闭模板的登记。
+2. 合格则保留标签；不合格只移除 `resolved`，保留其他标签。
+3. 可选发送飞书机器人通知，支持自定义安全关键词和签名。
+4. 持久记录投递、审计、删标及通知结果，防止重复投递重复执行。
+
+本仓库的 `examples/managed-repo/` 提供被纳管仓库的接入样例；将其中的 `.msbot/` 放入目标仓库根目录。Bot 服务的实例配置参见 [examples/instance.yaml](examples/instance.yaml)，仓库配置与模板通过 GitCode 从被纳管仓库读取。
+
+示例及运行入口：
+- [被纳管仓库配置示例](examples/managed-repo/.msbot/config.yaml)
+- [Bug 关闭模板示例](examples/managed-repo/.msbot/template/bug-close.yml)
+- [关闭登记评论示例](examples/bug-close-comment.md)
+- [安装、接入、飞书和长期运行说明](docs/bug-close-audit.md)
 
 ## 快速开始
 
-> 待补充。代码与工具链确定后，在此说明安装与运行方式。
+需要 Python 3.11+、Go 1.22+。当前需同时安装本次补充了服务接口的上游 `gitcode-cli` 工作区；该补充尚未发布，详见[依赖说明](docs/bug-close-audit.md#2-开发安装与上游依赖)。
+
+上游依赖：[codeasier/gitcode-cli#161](https://github.com/codeasier/gitcode-cli/pull/161)。
+
+```sh
+uv venv --python 3.12 .venv
+uv pip install -e '../gitcode-cli[dev]' -e '.[dev]'
+go build -o ./msbot ./cmd/msbot
+```
+
+按[使用说明](docs/bug-close-audit.md)配置实例、凭据、HTTPS 入口并启动服务，再执行 `msbot repo add owner/repo`。当前验证为离线联调；真实标签变更回调需在目标仓库验收。
 
 ## 参与贡献
 
@@ -34,10 +53,9 @@
 ## 待补充内容
 
 - [ ] 背景与要解决的问题
-- [ ] 功能范围与优先级
-- [ ] 技术选型与架构
-- [ ] 仓库目录结构
-- [ ] 使用与配置说明
+- [x] 首个案例范围
+- [x] Python 服务端、Go CLI 与上游能力边界
+- [x] 首个案例使用与配置说明
 - [ ] 路线图
 
 ## 许可证
