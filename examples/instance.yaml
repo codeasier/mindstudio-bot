@@ -1,0 +1,11 @@
+database: /var/lib/msbot/audit.sqlite3
+public_url: https://msbot.example.com
+admin_token_env: MSBOT_ADMIN_TOKEN
+
+# 可选。仓库配置中的 notification 只引用连接名，不保存 URL 或密钥。
+# feishu:
+#   engineering:
+#     url_env: MSBOT_FEISHU_URL
+#     repositories: ["owner/repo"]
+#     keywords: ["Bug关闭审计"]
+#     secret_env: MSBOT_FEISHU_SECRET
