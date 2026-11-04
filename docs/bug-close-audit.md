@@ -112,7 +112,7 @@ feishu:
 ./msbot repo list
 ```
 
-`repo add` 绑定仓库身份、加载配置并创建仅订阅 Issue 事件的 GitCode Webhook。默认密码模式；可用 `--signature` 选择 GitCode 签名密钥模式。其他仓库可用不同的实例环境变量：
+`repo add` 绑定仓库身份、加载配置并创建仅订阅 Issue 事件的 GitCode Webhook。默认密码模式；可用 `--signature` 选择 GitCode 签名密钥模式。逐仓管理员 Token、Webhook 密码和接入步骤见[接入一个仓库](repository-onboarding.md)。其他仓库可用不同的实例环境变量：
 
 ```sh
 ./msbot repo add owner/another-repo \

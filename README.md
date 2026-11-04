@@ -30,6 +30,7 @@
 - [Bug 关闭模板示例](examples/managed-repo/.msbot/template/bug-close.yml)
 - [关闭登记评论示例](examples/bug-close-comment.md)
 - [安装、接入、飞书和长期运行说明](docs/bug-close-audit.md)
+- [接入一个仓库](docs/repository-onboarding.md)
 
 ## 快速开始
 
