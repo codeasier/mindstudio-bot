@@ -1,8 +1,26 @@
 from __future__ import annotations
 
+from .config import ConfigurationError, repository_name
+
 
 class EventError(ValueError):
     pass
+
+
+def project_identity(payload: dict) -> dict:
+    project = payload.get("project")
+    if not isinstance(project, dict):
+        raise EventError("Missing project identity")
+    try:
+        name = repository_name(project.get("path_with_namespace"))
+    except ConfigurationError as exc:
+        raise EventError("Invalid project path") from exc
+    identity = project.get("id")
+    if type(identity) not in {int, str} or not str(identity).isascii() or not str(identity).isdigit():
+        raise EventError("Invalid project identity")
+    if str(identity).startswith("0"):
+        raise EventError("Invalid project identity")
+    return {"name": name, "project_id": str(identity)}
 
 
 def issue_author_login(issue: dict) -> str | None:

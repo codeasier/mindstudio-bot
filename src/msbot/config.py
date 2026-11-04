@@ -152,18 +152,26 @@ class FeishuConnection:
 
 
 @dataclass(frozen=True)
+class GitCodeDefaults:
+    token_env: str = "MSBOT_GITCODE_TOKEN"
+    webhook_secret_env: str = "MSBOT_GITCODE_WEBHOOK_SECRET"
+    webhook_mode: str = "password"
+
+
+@dataclass(frozen=True)
 class Settings:
     database: Path
     public_url: str
     admin_token_env: str = "MSBOT_ADMIN_TOKEN"
     feishu: dict[str, FeishuConnection] = field(default_factory=dict)
     tester_authors: tuple[str, ...] = ()
+    gitcode: GitCodeDefaults | None = None
 
     @classmethod
     def load(cls, path: str) -> Settings:
         root = mapping(
             load_yaml(Path(path).read_text(encoding="utf-8")),
-            {"database", "public_url", "admin_token_env", "feishu", "tester_authors"},
+            {"database", "public_url", "admin_token_env", "feishu", "tester_authors", "gitcode"},
             {"database", "public_url", "tester_authors"},
         )
         public_url = text(root["public_url"], "public_url").rstrip("/")
@@ -205,10 +213,24 @@ class Settings:
         admin_env = env_name(root.get("admin_token_env", "MSBOT_ADMIN_TOKEN"))
         secret(admin_env)
         testers = tuple(gitcode_logins(root["tester_authors"], name="tester_authors", limit=500))
+        gitcode = None
+        if "gitcode" in root:
+            entry = mapping(root["gitcode"], {"token_env", "webhook_secret_env", "webhook_mode"})
+            mode = entry.get("webhook_mode", "password")
+            if mode not in ("password", "signature"):
+                raise ConfigurationError("Expected password or signature webhook_mode")
+            gitcode = GitCodeDefaults(
+                env_name(entry.get("token_env", "MSBOT_GITCODE_TOKEN")),
+                env_name(entry.get("webhook_secret_env", "MSBOT_GITCODE_WEBHOOK_SECRET")),
+                mode,
+            )
+            secret(gitcode.token_env)
+            secret(gitcode.webhook_secret_env)
         return cls(
             Path(text(root["database"], "database")).expanduser(),
             public_url,
             admin_env,
             connections,
             testers,
+            gitcode,
         )

@@ -2,7 +2,7 @@
 
 > 面向 Ascend MindStudio 社区（GitCode）的 Issue / PR 自动化协作机器人。
 
-**当前实现**：Bug Issue 关闭审计案例。Python 服务端直接 import `codeasier/gitcode-cli` 服务层，Go CLI 管理仓库接入及结果查询；SQLite 持久队列支持长期值守。
+**当前实现**：Bug Issue 关闭审计案例。接入已认证 Webhook，并在仓库默认分支放置 `.msbot/config.yaml` 即可使用，无需预先登记仓库。Python 服务端直接 import `codeasier/gitcode-cli` 服务层；Go CLI 提供结果查询及原有接入管理，SQLite 持久队列支持长期值守。
 
 ---
 
@@ -44,7 +44,12 @@ uv pip install -e '../gitcode-cli[dev]' -e '.[dev]'
 go build -o ./msbot ./cmd/msbot
 ```
 
-按[使用说明](docs/bug-close-audit.md)配置实例、凭据、HTTPS 入口并启动服务，再执行 `msbot repo add owner/repo`。当前验证为离线联调；真实标签变更回调需在目标仓库验收。
+按[使用说明](docs/bug-close-audit.md)配置实例 `gitcode` 默认凭据、HTTPS 入口并启动服务。仓库接入只需：
+
+1. 在 GitCode 配置 Webhook，URL 为 `https://<Bot 域名>/hooks/gitcode`，选择 Issue 事件、JSON，并填写与实例一致的密码或签名密钥。
+2. 在仓库默认分支提交有效的 `.msbot/config.yaml` 及其中引用的模板，启用所需审计。
+
+首次回调先按本地记录受理并返回 202，无需执行 `msbot repo add`。未登记仓库由后台单个 worker 再核对 GitCode；核对失败只忽略该任务，不改标签、不发通知，也不阻止同一路径随后以另一个项目 ID 再次受理。配置缺失或任务未启用时跳过处理。统一入口已通过本地回归、上游 HTTP 服务联调及部署后的公网认证／持久受理／防重探测；未预登记仓库的真实 GitCode 首次回调仍待验收。
 
 ## 参与贡献
 

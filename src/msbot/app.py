@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, StrictBool, field_validator
 
 from .config import ConfigurationError, Settings, env_name, repository_name, secret
 from .engine import Engine
-from .events import EventError, classify
+from .events import EventError, classify, project_identity
 from .platform import Platform
 from .store import Conflict, Store, encoded
 
@@ -107,19 +107,15 @@ def create_app(settings: Settings, *, platform_factory=Platform, notify=None, st
         healthy = not start_worker or (worker is not None and worker.is_alive())
         return JSONResponse(status_code=200 if healthy else 503, content={"ok": healthy})
 
-    @app.post("/hooks/gitcode/{repo_id}", status_code=202)
-    async def webhook(repo_id: str, request: Request):
-        repo = store.repo_get(repo_id)
-        if repo is None:
-            raise HTTPException(404, "Unknown repository binding")
+    async def authenticated_payload(request: Request, secret_env: str, mode: str) -> dict:
         content = bytearray()
         async for chunk in request.stream():
             content.extend(chunk)
             if len(content) > 1_048_576:
                 raise HTTPException(413, "Webhook body exceeds 1 MiB")
         raw = bytes(content)
-        password = secret(repo["webhook_secret_env"]).encode()
-        if repo["webhook_mode"] == "signature":
+        password = secret(secret_env).encode()
+        if mode == "signature":
             expected = "sha256=" + hmac.new(password, raw, hashlib.sha256).hexdigest()
             actual = request.headers.get("x-gitcode-signature-256", "")
         else:
@@ -131,8 +127,14 @@ def create_app(settings: Settings, *, platform_factory=Platform, notify=None, st
             payload = json.loads(raw)
             if not isinstance(payload, dict):
                 raise ValueError
+        except ValueError:
+            raise HTTPException(400, "Invalid GitCode event JSON") from None
+        return payload
+
+    def event_details(request: Request, payload: dict, repo: dict):
+        try:
             number, reason = classify(payload, request.headers.get("x-gitcode-event", ""), repo)
-        except (ValueError, EventError):
+        except EventError:
             raise HTTPException(400, "Invalid or mismatched GitCode event") from None
         delivery = request.headers.get("x-gitcode-delivery") or payload.get("uuid")
         if (
@@ -143,6 +145,47 @@ def create_app(settings: Settings, *, platform_factory=Platform, notify=None, st
         ):
             raise HTTPException(400, "Missing or invalid delivery identity")
         digest = hashlib.sha256(encoded(payload).encode()).hexdigest()
+        return number, reason, delivery, digest
+
+    async def unified_payload(request: Request):
+        defaults = settings.gitcode
+        if defaults is None:
+            raise HTTPException(503, "Unified Webhook defaults are not configured")
+        return await authenticated_payload(request, defaults.webhook_secret_env, defaults.webhook_mode)
+
+    unified_event = Depends(unified_payload)
+
+    @app.post("/hooks/gitcode", status_code=202)
+    def unified_webhook(request: Request, payload: dict = unified_event):
+        try:
+            identity = project_identity(payload)
+        except EventError:
+            raise HTTPException(400, "Invalid GitCode project identity") from None
+        number, reason, delivery, digest = event_details(request, payload, identity)
+        defaults = settings.gitcode
+        job, duplicate = store.accept_unified(
+            identity["name"],
+            identity["project_id"],
+            {
+                "token_env": defaults.token_env,
+                "webhook_secret_env": defaults.webhook_secret_env,
+                "webhook_mode": defaults.webhook_mode,
+            },
+            delivery,
+            digest,
+            payload,
+            number,
+            reason,
+        )
+        return {"ok": True, "duplicate": duplicate, "data": job}
+
+    @app.post("/hooks/gitcode/{repo_id}", status_code=202)
+    async def webhook(repo_id: str, request: Request):
+        repo = store.repo_get(repo_id)
+        if repo is None:
+            raise HTTPException(404, "Unknown repository binding")
+        payload = await authenticated_payload(request, repo["webhook_secret_env"], repo["webhook_mode"])
+        number, reason, delivery, digest = event_details(request, payload, repo)
         job, duplicate = store.accept(repo_id, delivery, digest, payload, number, reason)
         return {"ok": True, "duplicate": duplicate, "data": job}
 

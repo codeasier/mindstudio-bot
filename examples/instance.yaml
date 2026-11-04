@@ -2,6 +2,13 @@ database: /var/lib/msbot/audit.sqlite3
 public_url: https://msbot.example.com
 admin_token_env: MSBOT_ADMIN_TOKEN
 
+# 统一入口 /hooks/gitcode：认证后按本地记录受理；未登记仓库由 worker 再核对，无需 repo add。
+# 省略整个 gitcode 段时，仅保留已有的带仓库 ID 入口。
+gitcode:
+  token_env: MSBOT_GITCODE_TOKEN
+  webhook_secret_env: MSBOT_GITCODE_WEBHOOK_SECRET
+  webhook_mode: password
+
 # 组织测试同学的 GitCode 登录名。仓库启用关单审计后，只审计本名单；
 # 仓库若再配置 authors，则与本名单取交集。请换成真实登录名。
 tester_authors:
