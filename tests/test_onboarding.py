@@ -31,7 +31,12 @@ def unified_rig(tmp_path, monkeypatch):
         calls.append(args)
         return platform
 
-    settings = Settings(tmp_path / "audit.sqlite3", "https://msbot.example.test", gitcode=GitCodeDefaults())
+    settings = Settings(
+        tmp_path / "audit.sqlite3",
+        "https://msbot.example.test",
+        tester_authors=("alice",),
+        gitcode=GitCodeDefaults(),
+    )
     app = create_app(settings, platform_factory=factory, start_worker=False)
     with TestClient(app) as client:
         yield client, app.state.store, app.state.engine, platform, calls
@@ -619,7 +624,9 @@ def test_instance_defaults_load_and_old_files_remain_valid(tmp_path, monkeypatch
     for name in ("MSBOT_ADMIN_TOKEN", "ACCOUNT_TOKEN", "HOOK_SECRET"):
         monkeypatch.setenv(name, "synthetic-value")
     path = tmp_path / "instance.yaml"
-    source = f"database: {tmp_path}/state.db\npublic_url: https://msbot.example.test\n"
+    source = (
+        f"database: {tmp_path}/state.db\npublic_url: https://msbot.example.test\ntester_authors:\n  - alice\n"
+    )
     path.write_text(source, encoding="utf-8")
     assert Settings.load(str(path)).gitcode is None
     path.write_text(
@@ -639,7 +646,8 @@ def test_invalid_defaults_and_missing_secrets_fail_at_startup(tmp_path, monkeypa
     monkeypatch.delenv("MSBOT_GITCODE_WEBHOOK_SECRET", raising=False)
     path = tmp_path / "instance.yaml"
     path.write_text(
-        f"database: {tmp_path}/state.db\npublic_url: https://msbot.example.test\ngitcode: {entry}\n",
+        f"database: {tmp_path}/state.db\npublic_url: https://msbot.example.test\n"
+        f"tester_authors:\n  - alice\ngitcode: {entry}\n",
         encoding="utf-8",
     )
     with pytest.raises(ConfigurationError):

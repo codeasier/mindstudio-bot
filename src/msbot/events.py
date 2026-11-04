@@ -23,6 +23,17 @@ def project_identity(payload: dict) -> dict:
     return {"name": name, "project_id": str(identity)}
 
 
+def issue_author_login(issue: dict) -> str | None:
+    """GitCode issue creator login. Display name is not a login."""
+    user = issue.get("user") if isinstance(issue, dict) else None
+    if not isinstance(user, dict):
+        return None
+    login = user.get("login")
+    if not isinstance(login, str) or not login or login != login.strip():
+        return None
+    return login
+
+
 def label_names(value) -> set[str]:
     if not isinstance(value, list):
         raise EventError("Expected a label list")

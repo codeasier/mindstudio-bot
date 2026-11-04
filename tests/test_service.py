@@ -154,7 +154,7 @@ def test_oversized_webhook_is_not_persisted(rig):
 def test_lifespan_worker_processes_durable_queue(tmp_path, monkeypatch):
     monkeypatch.setenv("MSBOT_ADMIN_TOKEN", "synthetic-admin")
     monkeypatch.setenv("MSBOT_GITCODE_WEBHOOK_SECRET", "synthetic-webhook-password")
-    settings = Settings(tmp_path / "audit.sqlite3", "https://msbot.example.test")
+    settings = Settings(tmp_path / "audit.sqlite3", "https://msbot.example.test", tester_authors=("alice",))
     platform = FakePlatform()
     app = create_app(settings, platform_factory=lambda *_args: platform)
     with TestClient(app) as client:

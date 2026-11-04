@@ -9,6 +9,11 @@ gitcode:
   webhook_secret_env: MSBOT_GITCODE_WEBHOOK_SECRET
   webhook_mode: password
 
+# 组织测试同学的 GitCode 登录名。仓库启用关单审计后，只审计本名单；
+# 仓库若再配置 authors，则与本名单取交集。请换成真实登录名。
+tester_authors:
+  - replace-me
+
 # 可选。仓库配置中的 notification 只引用连接名，不保存 URL 或密钥。
 # feishu:
 #   engineering:

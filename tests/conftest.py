@@ -19,6 +19,7 @@ CONFIG = (MANAGED_REPO / ".msbot/config.yaml").read_text(encoding="utf-8")
 class FakePlatform:
     def __init__(self):
         self.labels = ["bug", "resolved", "other-label"]
+        self.author = {"login": "alice"}
         self.comment_items = []
         self.config = CONFIG
         self.template = TEMPLATE
@@ -44,7 +45,11 @@ class FakePlatform:
         return self.template
 
     def issue(self, number):
-        return {"number": number, "labels": [{"name": name} for name in self.labels]}
+        return {
+            "number": number,
+            "labels": [{"name": name} for name in self.labels],
+            "user": self.author,
+        }
 
     def comments(self, _number):
         if self.comment_error:
@@ -74,7 +79,7 @@ def rig(tmp_path, monkeypatch):
     monkeypatch.setenv("MSBOT_GITCODE_TOKEN", "synthetic-token")
     monkeypatch.setenv("MSBOT_GITCODE_WEBHOOK_SECRET", "synthetic-webhook-password")
     platform = FakePlatform()
-    settings = Settings(tmp_path / "audit.sqlite3", "https://msbot.example.test")
+    settings = Settings(tmp_path / "audit.sqlite3", "https://msbot.example.test", tester_authors=("alice",))
     app = create_app(settings, platform_factory=lambda *_args: platform, start_worker=False)
     with TestClient(app) as client:
         yield client, app.state.store, app.state.engine, platform

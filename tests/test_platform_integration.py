@@ -36,7 +36,9 @@ def test_http_flow_uses_upstream_services_and_later_comment_page(tmp_path, monke
     )
     labels = ["bug", "resolved", "other"]
     respx_mock.get(f"{API}/repos/owner/repo/issues/42").mock(
-        side_effect=lambda _request: httpx.Response(200, json={"labels": [{"name": name} for name in labels]})
+        side_effect=lambda _request: httpx.Response(
+            200, json={"labels": [{"name": name} for name in labels], "user": {"login": "alice"}}
+        )
     )
 
     def comments(request):
@@ -52,6 +54,7 @@ def test_http_flow_uses_upstream_services_and_later_comment_page(tmp_path, monke
     settings = Settings(
         tmp_path / "audit.sqlite3",
         "https://msbot.example.test",
+        tester_authors=("alice",),
         gitcode=GitCodeDefaults() if unified else None,
     )
     app = create_app(settings, start_worker=False)
@@ -94,13 +97,17 @@ def test_instance_configuration_requires_environment_references(tmp_path, monkey
     monkeypatch.setenv("MSBOT_FEISHU_URL", "https://open.feishu.cn/open-apis/bot/v2/hook/synthetic")
     monkeypatch.setenv("MSBOT_FEISHU_SECRET", "synthetic-signing-secret")
     source = (Path(__file__).resolve().parents[1] / "examples/instance.yaml").read_text()
-    # Enable only the optional connection block, leaving explanatory comments intact.
-    source = "\n".join(
-        line.removeprefix("# ") if line.startswith(("# feishu:", "#   ")) else line
-        for line in source.splitlines()
-    )
+    lines = []
+    for line in source.splitlines():
+        if line.startswith("# feishu:") or line.startswith("#   "):
+            line = line[2:]
+        if "可选。" in line:
+            continue
+        lines.append(line)
+    source = "\n".join(lines) + "\n"
     path = tmp_path / "instance.yaml"
     path.write_text(source, encoding="utf-8")
     settings = Settings.load(str(path))
     assert settings.feishu["engineering"].keywords == ("Bug关闭审计",)
     assert settings.feishu["engineering"].secret_env == "MSBOT_FEISHU_SECRET"
+    assert settings.tester_authors == ("replace-me",)

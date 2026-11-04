@@ -86,3 +86,21 @@ def test_invalid_templates_cannot_activate(source):
 def test_invalid_repository_configuration(source):
     with pytest.raises(ConfigurationError):
         audit_configuration(source)
+
+
+def test_author_allowlist_is_casefolded():
+    parsed = audit_configuration(CONFIG + "    authors:\n      - Alice\n      - bob\n")
+    assert parsed["authors"] == ["alice", "bob"]
+
+
+@pytest.mark.parametrize(
+    "authors",
+    [
+        "    authors: []\n",
+        "    authors:\n      - alice\n      - Alice\n",
+        "    authors:\n      - not a login\n",
+    ],
+)
+def test_invalid_author_allowlist(authors):
+    with pytest.raises(ConfigurationError):
+        audit_configuration(CONFIG + authors)

@@ -16,7 +16,7 @@
 
 ## 功能范围
 
-被纳管 GitCode 仓库中的 `.msbot/config.yaml` 启用关闭审计并引用该仓库的 Issue Forms YAML 模板。含 `bug` 标签的 Issue 被新增 `resolved` 时：
+被纳管 GitCode 仓库中的 `.msbot/config.yaml` 启用关闭审计并引用该仓库的 Issue Forms YAML 模板。含 `bug` 标签的 Issue 被新增 `resolved` 时，只有实例测试同学名单中的提单人会继续审计；仓库若配置 `authors`，则再与该名单取交集：
 
 1. 完整读取评论，检查是否至少有一条单独符合关闭模板的登记。
 2. 合格则保留标签；不合格只移除 `resolved`，保留其他标签。
@@ -30,6 +30,7 @@
 - [Bug 关闭模板示例](examples/managed-repo/.msbot/template/bug-close.yml)
 - [关闭登记评论示例](examples/bug-close-comment.md)
 - [安装、接入、飞书和长期运行说明](docs/bug-close-audit.md)
+- [接入一个仓库](docs/repository-onboarding.md)
 
 ## 快速开始
 

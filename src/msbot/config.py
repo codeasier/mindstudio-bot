@@ -88,12 +88,32 @@ def template_path(value) -> str:
     return value
 
 
+def gitcode_logins(value, *, name: str, limit: int) -> list[str]:
+    if not isinstance(value, list) or not 1 <= len(value) <= limit:
+        raise ConfigurationError(f"{name} must list between 1 and {limit} GitCode logins")
+    seen: list[str] = []
+    folded: set[str] = set()
+    for item in value:
+        if not isinstance(item, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", item):
+            raise ConfigurationError(f"{name} must list GitCode logins")
+        key = item.casefold()
+        if key in folded:
+            raise ConfigurationError(f"{name} contains a duplicate GitCode login")
+        folded.add(key)
+        seen.append(key)
+    return seen
+
+
 def audit_configuration(source: str) -> dict:
     root = mapping(load_yaml(source), {"version", "audits"}, {"version", "audits"})
     if type(root["version"]) is not int or root["version"] != 1:
         raise ConfigurationError("Expected version: 1")
     audits = mapping(root["audits"], {"bug_issue_close"}, {"bug_issue_close"})
-    audit = mapping(audits["bug_issue_close"], {"enabled", "template", "notification"}, {"enabled"})
+    audit = mapping(
+        audits["bug_issue_close"],
+        {"enabled", "template", "notification", "authors"},
+        {"enabled"},
+    )
     if type(audit["enabled"]) is not bool:
         raise ConfigurationError("enabled must be a boolean")
     result = {"enabled": audit["enabled"]}
@@ -101,6 +121,8 @@ def audit_configuration(source: str) -> dict:
         result["template"] = template_path(audit.get("template"))
     if "notification" in audit:
         result["notification"] = text(audit["notification"], "notification")
+    if "authors" in audit:
+        result["authors"] = gitcode_logins(audit["authors"], name="authors", limit=100)
     return result
 
 
@@ -142,14 +164,15 @@ class Settings:
     public_url: str
     admin_token_env: str = "MSBOT_ADMIN_TOKEN"
     feishu: dict[str, FeishuConnection] = field(default_factory=dict)
+    tester_authors: tuple[str, ...] = ()
     gitcode: GitCodeDefaults | None = None
 
     @classmethod
     def load(cls, path: str) -> Settings:
         root = mapping(
             load_yaml(Path(path).read_text(encoding="utf-8")),
-            {"database", "public_url", "admin_token_env", "feishu", "gitcode"},
-            {"database", "public_url"},
+            {"database", "public_url", "admin_token_env", "feishu", "tester_authors", "gitcode"},
+            {"database", "public_url", "tester_authors"},
         )
         public_url = text(root["public_url"], "public_url").rstrip("/")
         parsed = urlsplit(public_url)
@@ -189,6 +212,7 @@ class Settings:
             connections[name] = connection
         admin_env = env_name(root.get("admin_token_env", "MSBOT_ADMIN_TOKEN"))
         secret(admin_env)
+        testers = tuple(gitcode_logins(root["tester_authors"], name="tester_authors", limit=500))
         gitcode = None
         if "gitcode" in root:
             entry = mapping(root["gitcode"], {"token_env", "webhook_secret_env", "webhook_mode"})
@@ -203,5 +227,10 @@ class Settings:
             secret(gitcode.token_env)
             secret(gitcode.webhook_secret_env)
         return cls(
-            Path(text(root["database"], "database")).expanduser(), public_url, admin_env, connections, gitcode
+            Path(text(root["database"], "database")).expanduser(),
+            public_url,
+            admin_env,
+            connections,
+            testers,
+            gitcode,
         )
