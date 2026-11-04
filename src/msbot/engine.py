@@ -7,7 +7,7 @@ from gitcode_cli.errors import APIError
 
 from . import feishu
 from .config import ConfigurationError, Settings, audit_configuration, secret, text
-from .events import label_names
+from .events import issue_author_login, label_names
 from .forms import IssueForm
 from .platform import Platform
 from .store import Conflict, Store
@@ -19,6 +19,14 @@ class Engine:
         self.store = store
         self.platform_factory = platform_factory
         self.notify = notify
+
+    def author_allowlisted(self, audit: dict, login: str) -> bool:
+        """Audit testers only. A repository list narrows that set by intersection."""
+        folded = login.casefold()
+        if folded not in self.settings.tester_authors:
+            return False
+        authors = audit.get("authors")
+        return authors is None or folded in authors
 
     def check_notification_binding(self, repo: dict, bundle: dict):
         name = bundle["audit"].get("notification")
@@ -176,6 +184,13 @@ class Engine:
             issue = platform.issue(job["issue_number"])
             if not {"bug", "resolved"} <= label_names(issue["labels"]):
                 self.store.job_update(job["id"], status="ignored", reason="bug_or_resolved_absent")
+                return True
+            login = issue_author_login(issue)
+            if login is None:
+                self.store.job_update(job["id"], status="failed", reason="author_unavailable")
+                return True
+            if not self.author_allowlisted(bundle["audit"], login):
+                self.store.job_update(job["id"], status="ignored", reason="author_not_allowlisted")
                 return True
             comments = platform.comments(job["issue_number"])
             form = IssueForm.parse(bundle["template"])

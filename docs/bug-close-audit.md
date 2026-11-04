@@ -24,9 +24,14 @@ audits:
   bug_issue_close:
     enabled: true
     template: .msbot/template/bug-close.yml
+    # 只审计这些 GitCode 登录名提单的 Issue；省略则审计全部提单人：
+    # authors:
+    #   - alice
     # 配置实例侧飞书连接后可启用：
     # notification: engineering
 ```
+
+`authors` 是仓库侧提单人名单，填写 GitCode 登录名，对应 Issue 详情里的 `user.login`，不是显示名 `user.name`，也不是后来添加 `resolved` 的操作者。名单 1 到 100 人，不区分大小写，不能重复。它不能单独扩大审计范围，有效名单是它与实例 `tester_authors` 的交集。交集之外的提单不读评论、不删除 `resolved`，任务记为 `ignored`（`author_not_allowlisted`）。读不到 `user.login` 时记为 `failed`（`author_unavailable`），同样不删标签。省略 `authors` 时审计实例测试名单中的全部账号。
 
 模板参考用户提供的 `bug-close.yml`，保留原字段 ID、标题、类型、必填及选项。入口与模板从默认分支的同一完整提交读取；合法更新在下一次新审计开始时生效。非法更新保留上一有效包，入口确认缺失或 `enabled: false` 停止新审计。读取故障不会被当作入口删除。
 
@@ -71,6 +76,8 @@ go build -o ./msbot ./cmd/msbot
 database: /var/lib/msbot/audit.sqlite3
 public_url: https://msbot.example.com
 admin_token_env: MSBOT_ADMIN_TOKEN
+tester_authors:
+  - alice
 feishu:
   engineering:
     url_env: MSBOT_FEISHU_URL
@@ -78,6 +85,8 @@ feishu:
     keywords: ["Bug关闭审计"]
     secret_env: MSBOT_FEISHU_SECRET
 ```
+
+`tester_authors` 是实例上的组织测试同学名单，填写 GitCode 登录名，1 到 500 人，不区分大小写。仓库启用关单审计后，这些账号提单必须审计。仓库若再配置 `authors`，有效名单是两边的交集：不在测试名单里的登录名不会被审计，测试名单里被仓库名单排除的账号也不会被审计。仓库省略 `authors` 时，有效名单就是完整的 `tester_authors`。
 
 飞书连接整体可省略。`repositories` 由实例管理员列出允许使用该连接的仓库；仓内引用不能扩大此范围。未开启关键词或签名时，分别省略 `keywords` 或 `secret_env`。在仓库入口增加 `notification: engineering` 才选择该连接。
 
@@ -140,7 +149,7 @@ CLI 发起接入前在用户缓存目录的 `msbot/operations/` 保存操作 ID 
 
 1. 校验 Webhook 密码／签名、项目路径和稳定项目 ID；持久保存投递后返回 202。
 2. 只有 Issue update 的明确标签差异新增 resolved 才入队。同仓 delivery ID 或事件 uuid 重复均复用记录；同标识不同正文冲突。
-3. 审计开始时绑定配置与模板快照；重新读取当前 Issue，缺少 bug 或 resolved 时忽略。
+3. 审计开始时绑定配置与模板快照；重新读取当前 Issue，缺少 bug 或 resolved 时忽略。提单人必须属于实例 `tester_authors`；仓库配置了 `authors` 时还要同时属于该名单。
 4. 完整分页读取评论，逐条验证模板；合格则保留标签。
 5. 全部不合格时再次检查当前标签，使用专用接口只删除 resolved，并读取当前标签确认结果。
 6. 配置飞书时发送通知，包含仓库、Issue 链接、模板路径及校验原因。
@@ -157,7 +166,7 @@ CLI 发起接入前在用户缓存目录的 `msbot/operations/` 保存操作 ID 
 | `queued`／`running` | 已持久接收／正在审计 |
 | `passed` | 找到合格登记，保留 resolved |
 | `rejected` | 登记不合格，已确认标签移除；通知结果另见 notification |
-| `ignored` | 不是触发事件、任务未启用，或当前标签不再适用 |
+| `ignored` | 不是触发事件、任务未启用、提单人不在白名单，或当前标签不再适用 |
 | `failed` | 配置／读取等确定错误，没有据此执行删标 |
 | `blocked` | 标签写入或通知结果不确定，保留记录，不自动重发 |
 

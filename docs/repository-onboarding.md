@@ -21,9 +21,13 @@ audits:
   bug_issue_close:
     enabled: true
     template: .msbot/template/bug-close.yml
+    # authors:
+    #   - alice
 ```
 
 模板路径必须位于 `.msbot/` 下，扩展名是 `.yml` 或 `.yaml`。接入时服务读取默认分支上同一次提交的配置和模板。配置非法会使接入失败，并且不会创建 Webhook。
+
+可选的 `authors` 再从实例配置的 `tester_authors` 里缩小范围，有效名单是两者的交集。只有交集内的 GitCode 登录名提单会做关闭审计。省略 `authors` 时，仓库启用审计即审计全部测试同学。实例名单之外的账号不会被审计。
 
 ## 2. 为该仓库配置管理员 Token 和 Webhook 密码
 

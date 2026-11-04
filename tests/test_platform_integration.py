@@ -34,7 +34,9 @@ def test_http_flow_uses_upstream_services_and_later_comment_page(tmp_path, monke
     )
     labels = ["bug", "resolved", "other"]
     respx_mock.get(f"{API}/repos/owner/repo/issues/42").mock(
-        side_effect=lambda _request: httpx.Response(200, json={"labels": [{"name": name} for name in labels]})
+        side_effect=lambda _request: httpx.Response(
+            200, json={"labels": [{"name": name} for name in labels], "user": {"login": "alice"}}
+        )
     )
 
     def comments(request):
@@ -47,7 +49,10 @@ def test_http_flow_uses_upstream_services_and_later_comment_page(tmp_path, monke
     removal_route = respx_mock.delete(f"{API}/repos/owner/repo/issues/42/labels/resolved").respond(
         200, json={}
     )
-    app = create_app(Settings(tmp_path / "audit.sqlite3", "https://msbot.example.test"), start_worker=False)
+    app = create_app(
+        Settings(tmp_path / "audit.sqlite3", "https://msbot.example.test", tester_authors=("alice",)),
+        start_worker=False,
+    )
     with TestClient(app) as client:
         registered = client.post("/api/repos", json=registration(str(uuid.uuid4())), headers=ADMIN).json()
         repo = registered["data"]["result"]
@@ -81,11 +86,17 @@ def test_instance_configuration_requires_environment_references(tmp_path, monkey
     monkeypatch.setenv("MSBOT_FEISHU_URL", "https://open.feishu.cn/open-apis/bot/v2/hook/synthetic")
     monkeypatch.setenv("MSBOT_FEISHU_SECRET", "synthetic-signing-secret")
     source = (Path(__file__).resolve().parents[1] / "examples/instance.yaml").read_text()
-    source = source.replace("# ", "")
-    # The explanatory comment is kept a comment while the example connection is enabled.
-    source = "\n".join(line for line in source.splitlines() if "可选。" not in line)
+    lines = []
+    for line in source.splitlines():
+        if line.startswith("# feishu:") or line.startswith("#   "):
+            line = line[2:]
+        if "可选。" in line:
+            continue
+        lines.append(line)
+    source = "\n".join(lines) + "\n"
     path = tmp_path / "instance.yaml"
     path.write_text(source, encoding="utf-8")
     settings = Settings.load(str(path))
     assert settings.feishu["engineering"].keywords == ("Bug关闭审计",)
     assert settings.feishu["engineering"].secret_env == "MSBOT_FEISHU_SECRET"
+    assert settings.tester_authors == ("replace-me",)

@@ -1,4 +1,5 @@
 import uuid
+from dataclasses import replace
 
 from gitcode_cli.errors import APIError, NetworkError
 
@@ -128,6 +129,97 @@ def test_unknown_removal_is_not_retried(rig):
     store.recover()
     assert not engine.run_once()
     assert platform.removals == ["42"]
+
+
+def test_allowlisted_author_is_audited(rig):
+    _, store, engine, platform = rig
+    platform.config += "    authors:\n      - Alice\n"
+    platform.author = {"login": "alice", "name": "展示名"}
+    repo = onboard(rig)
+    job = submit(rig, repo)
+    engine.run_once()
+    assert store.job_get(job["id"])["status"] == "rejected"
+    assert platform.removals == ["42"]
+
+
+def test_author_outside_allowlist_skips_audit(rig):
+    _, store, engine, platform = rig
+    platform.config += "    authors:\n      - alice\n"
+    platform.author = {"login": "bob", "name": "alice"}
+    platform.comment_error = RuntimeError("comments must not be read")
+    repo = onboard(rig)
+    job = submit(rig, repo)
+    engine.run_once()
+    result = store.job_get(job["id"])
+    assert result["status"] == "ignored"
+    assert result["reason"] == "author_not_allowlisted"
+    assert not platform.removals
+
+
+def test_repository_allowlist_intersects_server_testers(rig):
+    _, store, engine, platform = rig
+    engine.settings = replace(engine.settings, tester_authors=("alice", "carol"))
+    platform.config += "    authors:\n      - bob\n      - carol\n"
+    platform.author = {"login": "carol"}
+    repo = onboard(rig)
+    job = submit(rig, repo)
+    engine.run_once()
+    assert store.job_get(job["id"])["status"] == "rejected"
+    assert platform.removals == ["42"]
+
+
+def test_non_tester_in_repository_allowlist_is_not_audited(rig):
+    _, store, engine, platform = rig
+    engine.settings = replace(engine.settings, tester_authors=("alice",))
+    platform.config += "    authors:\n      - bob\n"
+    platform.author = {"login": "bob"}
+    platform.comment_error = RuntimeError("comments must not be read")
+    repo = onboard(rig)
+    job = submit(rig, repo)
+    engine.run_once()
+    result = store.job_get(job["id"])
+    assert result["status"] == "ignored"
+    assert result["reason"] == "author_not_allowlisted"
+    assert not platform.removals
+
+
+def test_tester_omitted_from_repository_list_is_not_audited(rig):
+    _, store, engine, platform = rig
+    engine.settings = replace(engine.settings, tester_authors=("alice", "carol"))
+    platform.config += "    authors:\n      - carol\n"
+    platform.author = {"login": "alice"}
+    platform.comment_error = RuntimeError("comments must not be read")
+    repo = onboard(rig)
+    job = submit(rig, repo)
+    engine.run_once()
+    result = store.job_get(job["id"])
+    assert result["status"] == "ignored"
+    assert result["reason"] == "author_not_allowlisted"
+    assert not platform.removals
+
+
+def test_enabled_repository_audits_server_testers_by_default(rig):
+    _, store, engine, platform = rig
+    engine.settings = replace(engine.settings, tester_authors=("alice", "bob"))
+    platform.author = {"login": "bob"}
+    repo = onboard(rig)
+    job = submit(rig, repo)
+    engine.run_once()
+    assert store.job_get(job["id"])["status"] == "rejected"
+    assert platform.removals == ["42"]
+
+
+def test_allowlist_without_login_does_not_remove_label(rig):
+    _, store, engine, platform = rig
+    platform.config += "    authors:\n      - alice\n"
+    platform.author = {"name": "alice"}
+    repo = onboard(rig)
+    job = submit(rig, repo)
+    engine.run_once()
+    result = store.job_get(job["id"])
+    assert result["status"] == "failed"
+    assert result["reason"] == "author_unavailable"
+    assert not platform.removals
 
 
 def test_disabled_configuration_prevents_removal(rig):
