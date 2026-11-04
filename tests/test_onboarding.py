@@ -13,7 +13,7 @@ from gitcode_cli.errors import APIError, NetworkError
 
 from msbot.app import create_app
 from msbot.config import ConfigurationError, FeishuConnection, GitCodeDefaults, Settings
-from msbot.store import Store
+from msbot.store import Store, separate_pending_candidates
 
 from .conftest import ADMIN, CONFIG, VALID_COMMENT, FakePlatform, event_payload, headers
 from .test_audit import onboard
@@ -339,6 +339,134 @@ def test_legacy_unique_name_keeps_pending_project_id(tmp_path):
     assert store.repo_get("pending-8")["project_id"] == "8"
     assert store.repo_get("pending-8")["status"] == "pending"
     assert {repo["project_id"] for repo in store.repo_list()} == {"7", "8"}
+
+
+def _legacy_queue(path):
+    """Old UNIQUE(name) database with two bindings and one already-accepted queued job."""
+    legacy = sqlite3.connect(path)
+    legacy.executescript("""
+        CREATE TABLE repos (
+            id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, project_id TEXT NOT NULL,
+            token_env TEXT NOT NULL, webhook_secret_env TEXT NOT NULL,
+            webhook_mode TEXT NOT NULL, status TEXT NOT NULL, webhook_id TEXT,
+            config TEXT, config_error TEXT
+        );
+        CREATE TABLE jobs (
+            id TEXT PRIMARY KEY, repo_id TEXT NOT NULL REFERENCES repos(id),
+            delivery TEXT NOT NULL, event_key TEXT, request_hash TEXT NOT NULL, payload TEXT NOT NULL,
+            issue_number TEXT, status TEXT NOT NULL, reason TEXT, snapshot TEXT, result TEXT,
+            removal TEXT NOT NULL DEFAULT 'none', notification TEXT NOT NULL DEFAULT 'none',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(repo_id, delivery), UNIQUE(repo_id, event_key)
+        );
+    """)
+    legacy.executemany(
+        "INSERT INTO repos(id, name, project_id, token_env, webhook_secret_env, webhook_mode, status) "
+        "VALUES(?, ?, ?, 'MSBOT_GITCODE_TOKEN', 'MSBOT_GITCODE_WEBHOOK_SECRET', 'password', ?)",
+        [
+            ("active-1", "owner/other", "1", "active"),
+            ("pending-8", "owner/repo", "8", "pending"),
+        ],
+    )
+    legacy.execute(
+        "INSERT INTO jobs(id, repo_id, delivery, event_key, request_hash, payload, issue_number, status) "
+        "VALUES('job-1', 'pending-8', 'delivery-old', 'event-old', 'digest', '{}', '42', 'queued')"
+    )
+    legacy.commit()
+    legacy.close()
+
+
+def _legacy_snapshot(path):
+    db = sqlite3.connect(path)
+    db.row_factory = sqlite3.Row
+    repos = [tuple(row) for row in db.execute("SELECT id, name, project_id, status FROM repos ORDER BY id")]
+    jobs = [tuple(row) for row in db.execute("SELECT id, repo_id, status FROM jobs ORDER BY id")]
+    names = {row["name"] for row in db.execute("SELECT name FROM sqlite_master")}
+    schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='repos'").fetchone()[0]
+    db.close()
+    return repos, jobs, names, schema
+
+
+def test_legacy_migration_keeps_queued_job(tmp_path):
+    path = tmp_path / "legacy.sqlite3"
+    _legacy_queue(path)
+    store = Store(path)
+    claimed = store.claim()
+    assert claimed["id"] == "job-1"
+    assert claimed["repo_id"] == "pending-8"
+    assert claimed["status"] == "queued"
+    assert store.repo_get("pending-8")["project_id"] == "8"
+    assert store.repo_get("active-1")["status"] == "active"
+    with store.connect() as db:
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert db.execute("SELECT name FROM sqlite_master WHERE name='repos_next'").fetchone() is None
+    Store(path)
+    assert len(store.repo_list()) == 2
+    assert store.job_get("job-1")["status"] == "running"
+
+
+@pytest.mark.parametrize("stage", ["copy", "drop", "rename"])
+def test_legacy_migration_interruption_rolls_back_and_retries(tmp_path, monkeypatch, stage):
+    path = tmp_path / "legacy.sqlite3"
+    _legacy_queue(path)
+    before = _legacy_snapshot(path)
+
+    def interrupt(stage_name):
+        if stage_name == stage:
+            raise RuntimeError("migration interrupted")
+
+    monkeypatch.setattr("msbot.store._migration_checkpoint", interrupt)
+    with pytest.raises(RuntimeError, match="migration interrupted"):
+        separate_pending_candidates(path)
+    monkeypatch.undo()
+
+    assert _legacy_snapshot(path) == before
+    _repos, _jobs, names, schema = before
+    assert "repos_next" not in names
+    assert "UNIQUE" in schema
+
+    store = Store(path)
+    claimed = store.claim()
+    assert claimed["id"] == "job-1"
+    assert claimed["repo_id"] == "pending-8"
+    assert store.repo_get("pending-8")["project_id"] == "8"
+    assert store.repo_get("active-1")["project_id"] == "1"
+    with store.connect() as db:
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+    again = Store(path)
+    assert {repo["id"] for repo in again.repo_list()} == {"active-1", "pending-8"}
+    assert again.job_get("job-1")["repo_id"] == "pending-8"
+
+
+def test_legacy_migration_retries_over_a_leftover_scratch_table(tmp_path):
+    path = tmp_path / "legacy.sqlite3"
+    _legacy_queue(path)
+    leftover = sqlite3.connect(path)
+    leftover.execute("CREATE TABLE repos_next (id TEXT PRIMARY KEY)")
+    leftover.commit()
+    leftover.close()
+    store = Store(path)
+    assert store.claim()["id"] == "job-1"
+    assert store.repo_get("pending-8")["project_id"] == "8"
+    with store.connect() as db:
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert db.execute("SELECT name FROM sqlite_master WHERE name='repos_next'").fetchone() is None
+
+
+def test_legacy_migration_fk_violation_keeps_the_old_database(tmp_path):
+    path = tmp_path / "legacy.sqlite3"
+    _legacy_queue(path)
+    broken = sqlite3.connect(path)
+    broken.execute("UPDATE jobs SET repo_id='missing'")
+    broken.commit()
+    broken.close()
+    before = _legacy_snapshot(path)
+    with pytest.raises(sqlite3.IntegrityError, match="dangling references"):
+        separate_pending_candidates(path)
+    assert _legacy_snapshot(path) == before
+    with pytest.raises(sqlite3.IntegrityError, match="dangling references"):
+        Store(path)
 
 
 @pytest.mark.parametrize("error", [APIError("sensitive-token", 403), NetworkError("sensitive-token")])

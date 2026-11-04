@@ -43,12 +43,21 @@ def _table_name_unique(db) -> bool:
     return False
 
 
+def _migration_checkpoint(stage: str) -> None:
+    """No-op seam. Tests raise here to stop a rebuild before it commits."""
+    del stage
+
+
 def separate_pending_candidates(path: Path) -> None:
     """Allow several pending identities for one path without changing stored project ids.
 
     Older databases used UNIQUE(name), so the first unverified project id occupied the only row.
     Verified and in-progress bindings stay unique by name. Pending rows are unique by name and
     project id, and this rebuild copies every existing column value as-is.
+
+    The copy, replacement, and indexes commit in one transaction. ``executescript`` would commit
+    first and then run each statement on its own, so an interruption could drop ``repos`` before
+    ``repos_next`` was renamed. A failure rolls the whole rebuild back.
     """
     db = sqlite3.connect(path)
     db.isolation_level = None
@@ -56,30 +65,50 @@ def separate_pending_candidates(path: Path) -> None:
         exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='repos'").fetchone()
         if exists is None or not _table_name_unique(db):
             return
+        # foreign_keys cannot change inside a transaction, so turn them off before BEGIN.
         db.execute("PRAGMA foreign_keys=OFF")
-        db.executescript("""
-            CREATE TABLE repos_next (
-                id TEXT PRIMARY KEY, name TEXT NOT NULL, project_id TEXT NOT NULL,
-                token_env TEXT NOT NULL, webhook_secret_env TEXT NOT NULL,
-                webhook_mode TEXT NOT NULL, status TEXT NOT NULL, webhook_id TEXT,
-                config TEXT, config_error TEXT
-            );
-            INSERT INTO repos_next(
-                id, name, project_id, token_env, webhook_secret_env, webhook_mode, status,
-                webhook_id, config, config_error
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            # A previous interrupted attempt may have left this empty scratch table.
+            # repos still holds the rows, so dropping the scratch table is safe.
+            db.execute("DROP TABLE IF EXISTS repos_next")
+            db.execute("""
+                CREATE TABLE repos_next (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, project_id TEXT NOT NULL,
+                    token_env TEXT NOT NULL, webhook_secret_env TEXT NOT NULL,
+                    webhook_mode TEXT NOT NULL, status TEXT NOT NULL, webhook_id TEXT,
+                    config TEXT, config_error TEXT
+                )
+                """)
+            db.execute("""
+                INSERT INTO repos_next(
+                    id, name, project_id, token_env, webhook_secret_env, webhook_mode, status,
+                    webhook_id, config, config_error
+                )
+                SELECT id, name, project_id, token_env, webhook_secret_env, webhook_mode, status,
+                    webhook_id, config, config_error
+                FROM repos
+                """)
+            _migration_checkpoint("copy")
+            db.execute("DROP TABLE repos")
+            _migration_checkpoint("drop")
+            db.execute("ALTER TABLE repos_next RENAME TO repos")
+            _migration_checkpoint("rename")
+            db.execute("CREATE UNIQUE INDEX repos_binding_name ON repos(name) WHERE status != 'pending'")
+            db.execute(
+                "CREATE UNIQUE INDEX repos_pending_identity "
+                "ON repos(name, project_id) WHERE status = 'pending'"
             )
-            SELECT id, name, project_id, token_env, webhook_secret_env, webhook_mode, status,
-                webhook_id, config, config_error
-            FROM repos;
-            DROP TABLE repos;
-            ALTER TABLE repos_next RENAME TO repos;
-            CREATE UNIQUE INDEX repos_binding_name ON repos(name) WHERE status != 'pending';
-            CREATE UNIQUE INDEX repos_pending_identity ON repos(name, project_id) WHERE status = 'pending';
-        """)
-        violations = db.execute("PRAGMA foreign_key_check").fetchall()
-        if violations:
-            raise sqlite3.IntegrityError(f"repository migration left dangling references: {violations}")
-        db.execute("PRAGMA foreign_keys=ON")
+            violations = db.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise sqlite3.IntegrityError(f"repository migration left dangling references: {violations}")
+            db.execute("COMMIT")
+        except Exception:
+            if db.in_transaction:
+                db.execute("ROLLBACK")
+            raise
+        finally:
+            db.execute("PRAGMA foreign_keys=ON")
     finally:
         db.close()
 
