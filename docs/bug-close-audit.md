@@ -183,6 +183,7 @@ CLI 发起接入前在用户缓存目录的 `msbot/operations/` 保存操作 ID 
 ```sh
 ./msbot task list
 ./msbot task get <task_id>
+./msbot task stats
 ```
 
 | status | 含义 |
@@ -194,9 +195,96 @@ CLI 发起接入前在用户缓存目录的 `msbot/operations/` 保存操作 ID 
 | `failed` | 配置／读取等确定错误，没有据此执行删标 |
 | `blocked` | 标签写入或通知结果不确定，保留记录，不自动重发 |
 
-飞书结果分别记录 `none`、`sending`、`sent`、`failed`、`unknown`。HTTP 200 但飞书 code 非零不算成功。通知失败不恢复标签，也不重复删标。`GET /healthz` 检查后台 worker 是否存活。
+标签移除后的飞书通知结果记录在 `notification`，取值为 `none`、`sending`、`sent`、`failed`、`unknown`。HTTP 200 但飞书 code 非零不算成功。通知失败不恢复标签，也不重复删标。`GET /healthz` 检查后台 worker 是否存活，不代表所有审计任务都成功。
 
-重启恢复只重新排队尚未发出外部写调用的工作；调用在途阶段保留未知结果。当前未提供强制重发／通用任务重试入口，先通过查询核对原操作和平台事实。
+重启恢复只重新排队尚未发出外部写调用的工作；调用在途阶段保留未知结果。`blocked` 任务仍须人工核对原操作和平台事实，不提供强制重发外部写入的入口。
+
+### 5.1 读取故障、诊断与失败告警
+
+GitCode 幂等读取遇到 `NetworkError`、HTTP 429 或 5xx 时最多尝试 **3 次（含首次）**，两次等待分别为 0.5 秒、1 秒。其他错误不按此策略自动重试。有限重试失败后，审计仍可进入 `failed`；不会仅因读取失败删除 `resolved`。创建 Webhook、删标签、发送飞书等外部写入不采用此重试策略，结果不确定时保留未知状态，避免重复执行。
+
+故障诊断记录在 `result.error`，使用 `type`、`cause_type`、`message`、`status_code`、`trace_id`、`request_id`、`retryable` 表达固定错误分类和可用元数据。`message` 是固定分类说明，不是服务器原文；HTTP 状态码和 trace 元数据仅在可用且通过校验时保留，不保存任意异常原文、请求 URL、响应正文或 Token。当前上游 `APIError` 不保留 trace，因而这类错误可能只有分类和 HTTP 状态码；不能把缺少 trace 解释为没有发生上游请求。
+
+审计执行失败会记录日志，并可发送独立飞书告警。告警只使用该仓库有效配置已绑定、且实例 `feishu.<name>.repositories` 明确授权给该仓库的连接。尚不能确认绑定时只记录日志和统计，不猜测机器人，也不向其他仓库的机器人发送。告警包含任务 ID、仓库、Issue 和安全诊断，便于管理员定位。
+
+失败告警状态单独记录在 `failure_notification`，取值同样为 `none`、`sending`、`sent`、`failed`、`unknown`；它不改写标签删除状态 `removal` 或标签删除后的通知状态 `notification`。失败告警发送失败或结果未知不会把原 `failed` 任务变成成功，也不会自动重发告警。
+
+### 5.2 任务统计
+
+管理员可使用 `./msbot task stats`，或调用相同管理 API：
+
+```sh
+curl --fail-with-body \
+  -H "Authorization: Bearer ${MSBOT_ADMIN_TOKEN}" \
+  "${MSBOT_URL}/api/tasks/stats"
+```
+
+返回格式如下，所有已知状态均有计数，空状态为 0：
+
+```json
+{
+  "ok": true,
+  "data": {
+    "counts": {
+      "queued": 0,
+      "running": 0,
+      "passed": 0,
+      "rejected": 0,
+      "ignored": 0,
+      "failed": 0,
+      "blocked": 0
+    },
+    "failed": 0,
+    "blocked": 0
+  }
+}
+```
+
+统计覆盖状态库中的全部任务，不限于 `task list` 的最近 50 条。`failed`、`blocked` 是保留任务的状态计数，**不是尚未处理的告警数**。人工重试会保留原失败任务，因此后继审计通过后，旧 `failed` 仍计入历史统计；不要据此认定重试未生效。统计与其他管理 API 一样要求管理员 Bearer Token，不向匿名请求开放。
+
+### 5.3 人工重试失败任务
+
+先查询原任务，核对失败原因，并确认 GitCode 访问、实例配置或仓库配置问题已经修复，再发起重试：
+
+```sh
+./msbot task get <failed_task_id>
+./msbot task retry <failed_task_id>
+```
+
+只接受仓库绑定仍为 `active`，且原任务同时满足 `status=failed`、`removal=none`、`notification=none` 的重试。`queued`、`running`、`passed`、`rejected`、`ignored`、`blocked`，以及已有标签写入／标签删除后通知记录的任务都不能通过此入口重放。独立失败告警的 `failure_notification` 不作为标签删除或业务通知的证明。
+
+CLI 在发送前生成 UUIDv4 `operation_id`，并将实例地址、目标 `task_id` 与 `operation_id` 写入私有操作回执，不写入管理员 Token。回执仍位于用户缓存目录 `msbot/operations/`，或 `MSBOT_OPERATION_DIR` 指定的目录；不能保存回执时不会发送请求。stderr 会给出查询命令：
+
+```sh
+./msbot operation get <operation_id>
+```
+
+重试 API 为 `POST /api/tasks/{task_id}/retry`，请求 JSON 只有 `operation_id`。用 curl 时也应在调用前自行保存目标任务与操作 ID，不要在连接中断后重新生成 ID：
+
+```sh
+TASK_ID='<failed_task_id>'
+OPERATION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+# 先保存 TASK_ID 和 OPERATION_ID，再调用：
+curl --fail-with-body \
+  -H "Authorization: Bearer ${MSBOT_ADMIN_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  --data "{\"operation_id\":\"${OPERATION_ID}\"}" \
+  "${MSBOT_URL}/api/tasks/${TASK_ID}/retry"
+```
+
+成功返回既有的 operation envelope：`data.status` 为 `succeeded`，`data.result.task_id` 是新任务 ID，`data.result.retry_of` 是原失败任务 ID。**这只确认重试任务已创建，不表示审计通过或标签状态已经正确。** 继续用 `./msbot task get <new_task_id>` 查询新任务的最终结果。
+
+每个失败任务最多创建一个直接后继。相同目标与相同 `operation_id` 再次请求返回原操作回执，不重复入队；同 ID 改目标或换成其他管理操作会冲突。原任务已有后继后，换一个 `operation_id` 也不能再为它创建第二个后继。API 对冲突或不满足重试条件返回 HTTP 409，未知任务返回 404，非法 UUIDv4 返回 400，缺少或错误管理员凭据返回 401。
+
+连接中断、响应损坏或非成功回执时，CLI 返回非零退出码且不自动重发；先查询原操作，必要时只用原 ID 重发同一请求：
+
+```sh
+./msbot task retry <failed_task_id> --operation-id <original_operation_id>
+```
+
+新任务保留 `retry_of` 关联，原 `failed` 审计记录及其诊断、告警状态不被覆盖。新任务开始时重新加载配置，不沿用原任务快照；合法更新生效，非法更新仍遵循上一有效配置回退规则。它也重新检查当前 Issue 标签和提单人范围，因此可能得到 `ignored` 等结果。后继若再次满足安全重试条件，可在修复原因后针对该后继发起下一次人工重试。
+
+人工重试不会修改原 Webhook 去重规则：重复投递仍返回原记录。当前没有定时补偿扫描、自动重放全部失败任务、强制重发标签写入或未知通知的能力。
 
 ## 6. Linux 长期运行
 

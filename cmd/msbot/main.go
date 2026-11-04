@@ -28,6 +28,16 @@ func newID() (string, error) {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", value[:4], value[4:6], value[6:8], value[8:10], value[10:]), nil
 }
 
+func operationIdentity(identity string) (string, error) {
+	if identity == "" {
+		return newID()
+	}
+	if !regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).MatchString(identity) {
+		return "", errors.New("operation-id must be a UUIDv4")
+	}
+	return identity, nil
+}
+
 func persistOperation(directory string, operationID string, base string, body []byte) error {
 	if directory == "" {
 		cache, err := os.UserCacheDir()
@@ -63,7 +73,7 @@ func persistOperation(directory string, operationID string, base string, body []
 
 func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.Writer) error {
 	if len(args) < 2 {
-		return errors.New("usage: msbot repo add OWNER/REPO [flags] | repo list | task list/get ID | operation get ID")
+		return errors.New("usage: msbot repo add OWNER/REPO [flags] | repo list | task list/stats | task get ID | task retry ID [--operation-id UUID] | operation get ID")
 	}
 	base := strings.TrimRight(getenv("MSBOT_URL"), "/")
 	if base == "" {
@@ -83,6 +93,7 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 	method := http.MethodGet
 	path := ""
 	var body []byte
+	var receiptBody []byte
 	operationID := ""
 	if args[0] == "repo" && args[1] == "add" {
 		if len(args) < 3 {
@@ -101,15 +112,9 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 		if flags.NArg() != 0 {
 			return errors.New("unexpected arguments")
 		}
-		operationID = *identity
-		if operationID == "" {
-			operationID, err = newID()
-			if err != nil {
-				return err
-			}
-		}
-		if !regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).MatchString(operationID) {
-			return errors.New("operation-id must be a UUIDv4")
+		operationID, err = operationIdentity(*identity)
+		if err != nil {
+			return err
 		}
 		mode := "password"
 		if *signature {
@@ -119,12 +124,32 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 			"operation_id": operationID, "repository": args[2], "token_env": *tokenEnv,
 			"webhook_secret_env": *secretEnv, "webhook_mode": mode, "create_webhook": !*manual,
 		})
-		if err := persistOperation(getenv("MSBOT_OPERATION_DIR"), operationID, base, body); err != nil {
-			return fmt.Errorf("cannot persist operation before dispatch: %w", err)
-		}
-		fmt.Fprintf(stderr, "operation_id=%s; query this ID if interrupted\n", operationID)
 		method = http.MethodPost
 		path = "/api/repos"
+	} else if args[0] == "task" && args[1] == "retry" {
+		if len(args) < 3 || strings.TrimSpace(args[2]) == "" || strings.HasPrefix(args[2], "--") {
+			return errors.New("task retry requires a task ID")
+		}
+		flags := flag.NewFlagSet("task retry", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		identity := flags.String("operation-id", "", "reuse the UUIDv4 of an interrupted retry")
+		if err := flags.Parse(args[3:]); err != nil {
+			return err
+		}
+		if flags.NArg() != 0 {
+			return errors.New("unexpected arguments")
+		}
+		operationID, err = operationIdentity(*identity)
+		if err != nil {
+			return err
+		}
+		body, _ = json.Marshal(map[string]string{"operation_id": operationID})
+		// The task is part of the URL, but must also bind the local receipt to its target.
+		receiptBody, _ = json.Marshal(map[string]string{"operation_id": operationID, "task_id": args[2]})
+		method = http.MethodPost
+		path = "/api/tasks/" + url.PathEscape(args[2]) + "/retry"
+	} else if len(args) == 2 && args[0] == "task" && args[1] == "stats" {
+		path = "/api/tasks/stats"
 	} else if len(args) == 2 && args[1] == "list" && (args[0] == "repo" || args[0] == "task") {
 		if args[0] == "repo" {
 			path = "/api/repos"
@@ -139,6 +164,15 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 		}
 	} else {
 		return errors.New("unknown command")
+	}
+	if method == http.MethodPost {
+		if receiptBody == nil {
+			receiptBody = body
+		}
+		if err := persistOperation(getenv("MSBOT_OPERATION_DIR"), operationID, base, receiptBody); err != nil {
+			return fmt.Errorf("cannot persist operation before dispatch: %w", err)
+		}
+		fmt.Fprintf(stderr, "operation_id=%s; query with: msbot operation get %s\n", operationID, operationID)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
@@ -172,9 +206,10 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 	}
 	if method == http.MethodPost {
 		var envelope struct {
+			OK   bool
 			Data struct{ Status string }
 		}
-		if err := json.Unmarshal(content, &envelope); err != nil || envelope.Data.Status != "succeeded" {
+		if err := json.Unmarshal(content, &envelope); err != nil || !envelope.OK || envelope.Data.Status != "succeeded" {
 			return fmt.Errorf("operation %s is not confirmed successful; query its result", operationID)
 		}
 	}

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Callable
+from time import sleep
+from typing import TypeVar
 
 from gitcode_cli.client import GitCodeClient
 from gitcode_cli.services.files import FileService
@@ -15,6 +18,27 @@ except ImportError:
     ) from None
 
 from .config import ConfigurationError, repository_name, secret
+from .diagnostics import is_transient_error
+
+T = TypeVar("T")
+READ_RETRY_DELAYS = (0.5, 1.0)
+
+
+def _read(operation: Callable[[], T]) -> T:
+    """Retry an entire idempotent service read, at most three times.
+
+    The required upstream GitCodeClient currently makes one HTTP attempt. Keep
+    this policy at the read boundary, never on its shared request/write methods.
+    Recheck that contract when upgrading upstream to avoid multiplying retries.
+    """
+    for attempt in range(len(READ_RETRY_DELAYS) + 1):
+        try:
+            return operation()
+        except Exception as exc:
+            if not is_transient_error(exc) or attempt == len(READ_RETRY_DELAYS):
+                raise
+            sleep(READ_RETRY_DELAYS[attempt])
+    raise AssertionError("Unreachable read retry state")
 
 
 class Platform:
@@ -34,16 +58,16 @@ class Platform:
         self.client.close()
 
     def repository(self):
-        result = self.repos.get(self.owner, self.name)
+        result = _read(lambda: self.repos.get(self.owner, self.name))
         if not isinstance(result, dict) or result.get("id") is None:
             raise ConfigurationError("Repository identity is unavailable")
         return result
 
     def branch(self, branch: str):
-        return self.repos.get_branch(self.owner, self.name, branch)
+        return _read(lambda: self.repos.get_branch(self.owner, self.name, branch))
 
     def file_text(self, path: str, revision: str) -> str:
-        result = self.files.get(self.owner, self.name, path, ref=revision)
+        result = _read(lambda: self.files.get(self.owner, self.name, path, ref=revision))
         if not isinstance(result, dict) or result.get("encoding") != "base64":
             raise ConfigurationError("Expected a Base64 file response")
         content = result.get("content")
@@ -52,13 +76,15 @@ class Platform:
         return base64.b64decode("".join(content.split()), validate=True).decode("utf-8")
 
     def issue(self, number: str):
-        result = self.issues.get(self.owner, self.name, number)
+        result = _read(lambda: self.issues.get(self.owner, self.name, number))
         if not isinstance(result, dict) or not isinstance(result.get("labels"), list):
             raise ConfigurationError("Current Issue labels are unavailable")
         return result
 
     def comments(self, number: str) -> list[dict]:
-        result = self.issues.list_all_comments(self.owner, self.name, number)
+        # A failed later page invalidates this attempt. Start over through the
+        # upstream paginator; never audit a partial result or concatenate retries.
+        result = _read(lambda: self.issues.list_all_comments(self.owner, self.name, number))
         if not isinstance(result, list) or any(
             not isinstance(item, dict) or not isinstance(item.get("body"), str) for item in result
         ):

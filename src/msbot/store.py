@@ -12,6 +12,15 @@ class Conflict(ValueError):
     pass
 
 
+def operation_digest(identity: str, request: dict) -> str:
+    try:
+        if uuid.UUID(identity).version != 4:
+            raise ValueError
+    except (ValueError, AttributeError) as exc:
+        raise ValueError("operation_id must be a UUIDv4") from exc
+    return hashlib.sha256(encoded(request).encode()).hexdigest()
+
+
 def encoded(value) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -147,6 +156,14 @@ class Store:
                 );
                 CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(status, created_at);
             """)
+            # Additive migration preserves existing queue entries and delivery identities.
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}
+            if "retry_of" not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN retry_of TEXT REFERENCES jobs(id)")
+            if "failure_notification" not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN failure_notification TEXT NOT NULL DEFAULT 'none'")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS jobs_retry_parent ON jobs(retry_of)")
 
     @contextmanager
     def connect(self):
@@ -160,12 +177,7 @@ class Store:
             db.close()
 
     def operation_begin(self, identity: str, request: dict) -> tuple[dict, bool]:
-        try:
-            if uuid.UUID(identity).version != 4:
-                raise ValueError
-        except (ValueError, AttributeError) as exc:
-            raise ValueError("operation_id must be a UUIDv4") from exc
-        digest = hashlib.sha256(encoded(request).encode()).hexdigest()
+        digest = operation_digest(identity, request)
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM operations WHERE id=?", (identity,)).fetchone()
@@ -393,7 +405,15 @@ class Store:
             return decoded(row)
 
     def job_update(self, identity: str, **values):
-        allowed = {"status", "reason", "snapshot", "result", "removal", "notification"}
+        allowed = {
+            "status",
+            "reason",
+            "snapshot",
+            "result",
+            "removal",
+            "notification",
+            "failure_notification",
+        }
         if not values or set(values) - allowed:
             raise ValueError("Invalid audit update")
         for key in {"snapshot", "result"} & values.keys():
@@ -426,13 +446,68 @@ class Store:
                 for row in db.execute("SELECT * FROM jobs ORDER BY rowid DESC LIMIT ?", (limit,))
             ]
 
+    def job_stats(self):
+        counts = dict.fromkeys(("queued", "running", "passed", "rejected", "ignored", "failed", "blocked"), 0)
+        with self.connect() as db:
+            counts.update(
+                {
+                    row["status"]: row["count"]
+                    for row in db.execute("SELECT status, COUNT(*) AS count FROM jobs GROUP BY status")
+                }
+            )
+        return {"counts": counts, "failed": counts["failed"], "blocked": counts["blocked"]}
+
+    def retry_job(self, identity: str, operation_id: str):
+        digest = operation_digest(operation_id, {"action": "retry_audit", "task_id": identity})
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            operation = db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
+            if operation:
+                if operation["request_hash"] != digest:
+                    raise Conflict("operation_id was already used with different parameters")
+                return decoded(operation)
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (identity,)).fetchone()
+            if row is None:
+                raise KeyError(identity)
+            if row["status"] != "failed" or row["removal"] != "none" or row["notification"] != "none":
+                raise Conflict("Only failed audits without label or rejection-notification writes may retry")
+            repo = db.execute("SELECT status FROM repos WHERE id=?", (row["repo_id"],)).fetchone()
+            if repo is None or repo["status"] != "active":
+                raise Conflict("Repository binding is not active")
+            child = db.execute("SELECT id FROM jobs WHERE retry_of=?", (identity,)).fetchone()
+            if child:
+                raise Conflict(f"Audit already has a retry task: {child['id']}")
+            child_id = str(uuid.uuid4())
+            # No snapshot: re-read current configuration, labels, author and complete comments.
+            db.execute(
+                "INSERT INTO jobs(id, repo_id, delivery, request_hash, payload, "
+                "issue_number, status, retry_of) "
+                "VALUES(?, ?, ?, ?, ?, ?, 'queued', ?)",
+                (
+                    child_id,
+                    row["repo_id"],
+                    f"retry:{operation_id}",
+                    row["request_hash"],
+                    row["payload"],
+                    row["issue_number"],
+                    identity,
+                ),
+            )
+            db.execute(
+                "INSERT INTO operations(id, request_hash, status, result) VALUES(?, ?, 'succeeded', ?)",
+                (operation_id, digest, encoded({"task_id": child_id, "retry_of": identity})),
+            )
+        return self.operation_get(operation_id)
+
     def recover(self):
         with self.connect() as db:
+            db.execute("UPDATE jobs SET failure_notification='unknown' WHERE failure_notification='sending'")
             db.execute(
                 "UPDATE jobs SET status='blocked', reason='interrupted_external_write', "
                 "removal=CASE WHEN removal='calling' THEN 'unknown' ELSE removal END, "
                 "notification=CASE WHEN notification='sending' THEN 'unknown' ELSE notification END "
-                "WHERE status='running' AND (removal='calling' OR notification='sending')"
+                "WHERE status='running' AND (removal IN ('calling', 'unknown') "
+                "OR notification IN ('sending', 'unknown'))"
             )
             db.execute("UPDATE jobs SET status='queued' WHERE status='running'")
             db.execute(

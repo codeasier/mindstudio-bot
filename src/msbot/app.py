@@ -43,6 +43,11 @@ class Registration(BaseModel):
         return env_name(value)
 
 
+class RetryAudit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operation_id: str
+
+
 def create_app(settings: Settings, *, platform_factory=Platform, notify=None, start_worker=True) -> FastAPI:
     store = Store(settings.database)
     options = {"notify": notify} if notify is not None else {}
@@ -207,6 +212,23 @@ def create_app(settings: Settings, *, platform_factory=Platform, notify=None, st
     @app.get("/api/tasks", dependencies=[Depends(administrator)])
     def tasks():
         return {"ok": True, "data": store.job_list()}
+
+    @app.get("/api/tasks/stats", dependencies=[Depends(administrator)])
+    def task_stats():
+        return {"ok": True, "data": store.job_stats()}
+
+    @app.post("/api/tasks/{identity}/retry", dependencies=[Depends(administrator)])
+    def retry_task(identity: str, body: RetryAudit):
+        try:
+            operation = store.retry_job(identity, body.operation_id)
+        except KeyError:
+            raise HTTPException(404, "Unknown audit") from None
+        except ValueError as exc:
+            if isinstance(exc, Conflict):
+                raise
+            raise HTTPException(400, "Invalid operation identifier") from None
+        operation.pop("request_hash", None)
+        return {"ok": True, "operation_id": body.operation_id, "data": operation}
 
     @app.get("/api/tasks/{identity}", dependencies=[Depends(administrator)])
     def task(identity: str):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import os
 import re
 import uuid
 
@@ -7,10 +9,13 @@ from gitcode_cli.errors import APIError
 
 from . import feishu
 from .config import ConfigurationError, Settings, audit_configuration, secret, text
+from .diagnostics import error_details
 from .events import issue_author_login, label_names
 from .forms import IssueForm
 from .platform import Platform
 from .store import Conflict, Store
+
+log = logging.getLogger(__name__)
 
 
 def task_matches_repository(job: dict, repo: dict) -> bool:
@@ -199,6 +204,8 @@ class Engine:
         if job is None:
             return False
         platform = None
+        repo = None
+        bundle = None
         try:
             repo = self.store.repo_get(job["repo_id"])
             if not task_matches_repository(job, repo):
@@ -226,7 +233,9 @@ class Engine:
                 return True
             login = issue_author_login(issue)
             if login is None:
-                self.store.job_update(job["id"], status="failed", reason="author_unavailable")
+                self.fail_audit(
+                    job, repo, bundle, ConfigurationError("Author unavailable"), reason="author_unavailable"
+                )
                 return True
             if not self.author_allowlisted(bundle["audit"], login):
                 self.store.job_update(job["id"], status="ignored", reason="author_not_allowlisted")
@@ -264,21 +273,68 @@ class Engine:
                 if "resolved" in label_names(platform.issue(job["issue_number"])["labels"]):
                     raise RuntimeError("Label removal could not be confirmed")
             except Exception as exc:
-                self.store.job_update(
-                    job["id"],
-                    status="blocked",
-                    removal="unknown",
-                    reason=f"label_removal_unknown: {type(exc).__name__}",
-                )
+                self.store.job_update(job["id"], status="blocked", removal="unknown")
+                self.fail_audit(job, repo, bundle, exc, reason=f"label_removal_unknown: {type(exc).__name__}")
                 return True
             self.store.job_update(job["id"], removal="confirmed")
             self.finish_notification(job, repo, bundle, result)
         except Exception as exc:
-            self.store.job_update(job["id"], status="failed", reason=f"audit_failed: {type(exc).__name__}")
+            self.fail_audit(job, repo, bundle, exc)
         finally:
             if platform is not None:
                 platform.close()
         return True
+
+    def fail_audit(self, job: dict, repo: dict | None, bundle: dict | None, exc: Exception, *, reason=None):
+        envs = {self.settings.admin_token_env}
+        if repo:
+            envs.update((repo["token_env"], repo["webhook_secret_env"]))
+        for connection in self.settings.feishu.values():
+            envs.add(connection.url_env)
+            if connection.secret_env:
+                envs.add(connection.secret_env)
+        details = error_details(exc, secrets=tuple(os.environ.get(name, "") for name in envs))
+        current = self.store.job_get(job["id"])
+        # Unexpected exceptions after an external call must never become manually retryable.
+        status = "failed" if current["removal"] == current["notification"] == "none" else "blocked"
+        bundle = bundle or (repo.get("config") if repo else None)
+        name = None
+        if repo and bundle and current["failure_notification"] == "none":
+            try:
+                self.check_notification_binding(repo, bundle)
+                name = bundle["audit"].get("notification")
+            except ConfigurationError:
+                pass
+        # Persist the decision and sending marker atomically. A crash is then
+        # visible as unknown on recovery, never silently none or auto-replayed.
+        self.store.job_update(
+            job["id"],
+            status=status,
+            reason=reason or f"audit_failed: {type(exc).__name__}",
+            result=(current.get("result") or {}) | {"error": details},
+            failure_notification="sending" if name else current["failure_notification"],
+        )
+        log.error("Audit %s %s: %s", job["id"], status, details)
+        if name is None:
+            return
+        message = "\n".join(
+            [
+                "Bug Issue 关闭审计执行失败，需要人工检查。",
+                f"仓库：{repo['name']}",
+                f"Issue：https://gitcode.com/{repo['name']}/issues/{job['issue_number']}",
+                f"任务：{job['id']}",
+                f"错误：{details['message']}（HTTP {details.get('status_code')}）",
+                f"标签操作状态：{current['removal']}。未确认审计通过，请检查任务后决定是否重新审计。",
+            ]
+        )
+        try:
+            self.notify(self.settings.feishu[name], message)
+        except feishu.NotificationRejected:
+            self.store.job_update(job["id"], failure_notification="failed")
+        except Exception:
+            self.store.job_update(job["id"], failure_notification="unknown")
+        else:
+            self.store.job_update(job["id"], failure_notification="sent")
 
     def finish_notification(self, job: dict, repo: dict, bundle: dict, result: dict):
         name = bundle["audit"].get("notification")
