@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -12,6 +13,7 @@ from gitcode_cli.errors import APIError, NetworkError
 
 from msbot.app import create_app
 from msbot.config import ConfigurationError, FeishuConnection, GitCodeDefaults, Settings
+from msbot.store import Store
 
 from .conftest import ADMIN, CONFIG, VALID_COMMENT, FakePlatform, event_payload, headers
 from .test_audit import onboard
@@ -39,6 +41,13 @@ def receive(rig, payload=None, delivery="delivery-1"):
     response = rig[0].post("/hooks/gitcode", json=payload or event_payload(), headers=headers(delivery))
     assert response.status_code == 202, response.text
     return response.json()
+
+
+def project_delivery(project_id, delivery):
+    return event_payload() | {
+        "uuid": delivery,
+        "project": {"id": project_id, "path_with_namespace": "owner/repo"},
+    }
 
 
 @pytest.mark.parametrize("valid_comment", [False, True])
@@ -159,6 +168,172 @@ def test_api_identity_mismatch_is_ignored_without_label_changes(unified_rig):
     assert not platform.removals
     assert not platform.hooks
     assert store.repo_list()[0]["status"] == "pending"
+
+
+def test_ignored_candidate_does_not_block_a_later_verified_identity(unified_rig):
+    client, store, engine, platform, calls = unified_rig
+    wrong = client.post("/hooks/gitcode", json=project_delivery(8, "wrong-event"), headers=headers("wrong"))
+    assert wrong.status_code == 202, wrong.text
+    wrong_job = wrong.json()["data"]["id"]
+    wrong_repo = wrong.json()["data"]["repo_id"]
+    assert engine.run_once()
+    assert store.job_get(wrong_job)["status"] == "ignored"
+    assert store.job_get(wrong_job)["reason"] == "repository_unverified"
+    assert store.repo_get(wrong_repo)["status"] == "pending"
+    assert store.repo_get(wrong_repo)["project_id"] == "8"
+    assert not platform.removals
+    assert not platform.hooks
+
+    correct = client.post("/hooks/gitcode", json=project_delivery(7, "right-event"), headers=headers("right"))
+    assert correct.status_code == 202, correct.text
+    correct_job = correct.json()["data"]["id"]
+    correct_repo = correct.json()["data"]["repo_id"]
+    assert correct_repo != wrong_repo
+    assert store.repo_get(wrong_repo)["project_id"] == "8"
+    assert engine.run_once()
+    assert store.job_get(correct_job)["status"] == "rejected"
+    assert store.repo_get(correct_repo) == store.repo_get(correct_repo) | {
+        "status": "active",
+        "project_id": "7",
+    }
+    assert store.repo_get(wrong_repo)["status"] == "pending"
+    assert store.repo_get(wrong_repo)["project_id"] == "8"
+    assert store.job_get(wrong_job)["status"] == "ignored"
+    assert platform.removals == ["42"]
+    assert not platform.hooks
+
+    seen = len(calls)
+    conflict = client.post(
+        "/hooks/gitcode", json=project_delivery(8, "wrong-again"), headers=headers("wrong-again")
+    )
+    assert conflict.status_code == 409
+    assert calls[seen:] == []
+    assert store.repo_get(correct_repo)["project_id"] == "7"
+    assert store.repo_get(wrong_repo)["project_id"] == "8"
+    assert platform.removals == ["42"]
+    assert {job["id"] for job in store.job_list()} == {wrong_job, correct_job}
+
+
+def test_queued_mismatch_cannot_execute_after_another_candidate_is_verified(unified_rig):
+    client, store, engine, platform, _calls = unified_rig
+    wrong = client.post("/hooks/gitcode", json=project_delivery(8, "wrong-event"), headers=headers("wrong"))
+    correct = client.post("/hooks/gitcode", json=project_delivery(7, "right-event"), headers=headers("right"))
+    assert wrong.status_code == correct.status_code == 202
+    wrong_job = wrong.json()["data"]["id"]
+    wrong_repo = wrong.json()["data"]["repo_id"]
+    correct_repo = correct.json()["data"]["repo_id"]
+    with store.connect() as db:
+        db.execute("UPDATE jobs SET status='blocked' WHERE id=?", (wrong_job,))
+    assert engine.run_once()
+    assert store.repo_get(correct_repo)["status"] == "active"
+    assert store.repo_get(correct_repo)["project_id"] == "7"
+    assert store.repo_get(wrong_repo)["project_id"] == "8"
+    with store.connect() as db:
+        db.execute(
+            "UPDATE jobs SET status='queued', reason=NULL WHERE id=?",
+            (wrong_job,),
+        )
+    assert engine.run_once()
+    assert store.job_get(wrong_job)["status"] == "ignored"
+    assert store.job_get(wrong_job)["reason"] == "repository_unverified"
+    assert store.job_get(wrong_job)["removal"] == "none"
+    assert store.repo_get(wrong_repo)["status"] == "pending"
+    assert store.repo_get(wrong_repo)["project_id"] == "8"
+    assert store.repo_get(correct_repo)["status"] == "active"
+    assert platform.removals == ["42"]
+    assert not platform.hooks
+
+
+def test_candidate_identities_survive_restart(unified_rig):
+    client, store, engine, platform, _calls = unified_rig
+    wrong = client.post("/hooks/gitcode", json=project_delivery(8, "wrong-event"), headers=headers("wrong"))
+    correct = client.post("/hooks/gitcode", json=project_delivery(7, "right-event"), headers=headers("right"))
+    assert wrong.status_code == correct.status_code == 202
+    wrong_job = wrong.json()["data"]["id"]
+    correct_job = correct.json()["data"]["id"]
+    wrong_repo = wrong.json()["data"]["repo_id"]
+    correct_repo = correct.json()["data"]["repo_id"]
+    with store.connect() as db:
+        db.execute("UPDATE jobs SET status='running'")
+    store.recover()
+    assert {job["status"] for job in store.job_list()} == {"queued"}
+    assert store.repo_get(wrong_repo)["project_id"] == "8"
+    assert store.repo_get(correct_repo)["project_id"] == "7"
+    assert engine.run_once()
+    assert engine.run_once()
+    assert store.job_get(wrong_job)["reason"] == "repository_unverified"
+    assert store.job_get(correct_job)["status"] == "rejected"
+    assert store.repo_get(wrong_repo)["status"] == "pending"
+    assert store.repo_get(wrong_repo)["project_id"] == "8"
+    assert store.repo_get(correct_repo)["status"] == "active"
+    assert store.repo_get(correct_repo)["project_id"] == "7"
+    assert platform.removals == ["42"]
+    assert not engine.run_once()
+
+
+def test_concurrent_distinct_candidates_do_not_overwrite_each_other(unified_rig):
+    client, store, _engine, _platform, calls = unified_rig
+    barrier = Barrier(8)
+
+    def post(index):
+        barrier.wait(timeout=5)
+        project_id = 7 if index % 2 == 0 else 8
+        delivery = f"delivery-{index}"
+        return client.post(
+            "/hooks/gitcode",
+            json=project_delivery(project_id, delivery),
+            headers=headers(delivery),
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        responses = list(pool.map(post, range(8)))
+    assert {response.status_code for response in responses} == {202}
+    repos = store.repo_list()
+    assert {repo["project_id"] for repo in repos} == {"7", "8"}
+    assert {repo["status"] for repo in repos} == {"pending"}
+    assert len(repos) == 2
+    assert len(store.job_list()) == 8
+    assert calls == []
+
+
+def test_legacy_unique_name_keeps_pending_project_id(tmp_path):
+    path = tmp_path / "legacy.sqlite3"
+    legacy = sqlite3.connect(path)
+    legacy.executescript("""
+        CREATE TABLE repos (
+            id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, project_id TEXT NOT NULL,
+            token_env TEXT NOT NULL, webhook_secret_env TEXT NOT NULL,
+            webhook_mode TEXT NOT NULL, status TEXT NOT NULL, webhook_id TEXT,
+            config TEXT, config_error TEXT
+        );
+    """)
+    legacy.execute(
+        "INSERT INTO repos(id, name, project_id, token_env, webhook_secret_env, webhook_mode, status) "
+        "VALUES('pending-8', 'owner/repo', '8', 'MSBOT_GITCODE_TOKEN', "
+        "'MSBOT_GITCODE_WEBHOOK_SECRET', 'password', 'pending')"
+    )
+    legacy.commit()
+    legacy.close()
+    store = Store(path)
+    payload = project_delivery(7, "right-event")
+    _job, duplicate = store.accept_unified(
+        "owner/repo",
+        "7",
+        {
+            "token_env": "MSBOT_GITCODE_TOKEN",
+            "webhook_secret_env": "MSBOT_GITCODE_WEBHOOK_SECRET",
+            "webhook_mode": "password",
+        },
+        "right",
+        "digest",
+        payload,
+        "42",
+        None,
+    )
+    assert not duplicate
+    assert store.repo_get("pending-8")["project_id"] == "8"
+    assert store.repo_get("pending-8")["status"] == "pending"
+    assert {repo["project_id"] for repo in store.repo_list()} == {"7", "8"}
 
 
 @pytest.mark.parametrize("error", [APIError("sensitive-token", 403), NetworkError("sensitive-token")])

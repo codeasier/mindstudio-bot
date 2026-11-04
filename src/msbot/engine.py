@@ -13,6 +13,15 @@ from .platform import Platform
 from .store import Conflict, Store
 
 
+def task_matches_repository(job: dict, repo: dict) -> bool:
+    """A task may run only against the repository row that accepted its own project identity."""
+    payload = job.get("payload")
+    project = payload.get("project") if isinstance(payload, dict) else None
+    if not isinstance(project, dict) or project.get("path_with_namespace") != repo["name"]:
+        return False
+    return str(project.get("id")) == repo["project_id"]
+
+
 class Engine:
     def __init__(self, settings: Settings, store: Store, platform_factory=Platform, notify=feishu.send):
         self.settings = settings
@@ -156,7 +165,8 @@ class Engine:
                 platform.close()
         if not isinstance(info, dict) or str(info.get("id")) != repo["project_id"]:
             return False
-        self.store.repo_update(repo["id"], status="active")
+        if not self.store.activate_pending(repo["id"]):
+            return False
         repo["status"] = "active"
         return True
 
@@ -183,6 +193,9 @@ class Engine:
         platform = None
         try:
             repo = self.store.repo_get(job["repo_id"])
+            if not task_matches_repository(job, repo):
+                self.store.job_update(job["id"], status="ignored", reason="repository_unverified")
+                return True
             if repo["status"] == "pending" and not self.confirm_repository(repo):
                 self.store.job_update(job["id"], status="ignored", reason="repository_unverified")
                 return True
