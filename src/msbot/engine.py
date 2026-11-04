@@ -140,6 +140,26 @@ class Engine:
             if platform is not None:
                 platform.close()
 
+    def confirm_repository(self, repo: dict) -> bool:
+        """Verify a pending unified binding. Reads the GitCode project id and never writes."""
+        if repo["status"] != "pending":
+            return True
+        platform = None
+        info = None
+        try:
+            platform = self.platform_factory(repo["name"], repo["token_env"])
+            info = platform.repository()
+        except Exception:
+            return False
+        finally:
+            if platform is not None:
+                platform.close()
+        if not isinstance(info, dict) or str(info.get("id")) != repo["project_id"]:
+            return False
+        self.store.repo_update(repo["id"], status="active")
+        repo["status"] = "active"
+        return True
+
     def webhook_url(self, repo_id: str) -> str:
         return f"{self.settings.public_url}/hooks/gitcode/{repo_id}"
 
@@ -163,6 +183,12 @@ class Engine:
         platform = None
         try:
             repo = self.store.repo_get(job["repo_id"])
+            if repo["status"] == "pending" and not self.confirm_repository(repo):
+                self.store.job_update(job["id"], status="ignored", reason="repository_unverified")
+                return True
+            if job["reason"]:
+                self.store.job_update(job["id"], status="ignored")
+                return True
             platform = self.platform_factory(repo["name"], repo["token_env"])
             bundle = job["snapshot"] or self.load_bundle(repo, platform)
             if not bundle or not bundle["audit"]["enabled"]:

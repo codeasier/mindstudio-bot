@@ -3,17 +3,19 @@ import uuid
 from pathlib import Path
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from msbot.app import create_app
-from msbot.config import Settings
+from msbot.config import GitCodeDefaults, Settings
 
 from .conftest import ADMIN, CONFIG, TEMPLATE, VALID_COMMENT, event_payload, headers, registration
 
 API = "https://api.gitcode.com/api/v5"
 
 
-def test_http_flow_uses_upstream_services_and_later_comment_page(tmp_path, monkeypatch, respx_mock):
+@pytest.mark.parametrize("unified", [False, True])
+def test_http_flow_uses_upstream_services_and_later_comment_page(tmp_path, monkeypatch, respx_mock, unified):
     monkeypatch.setenv("MSBOT_ADMIN_TOKEN", "synthetic-admin")
     monkeypatch.setenv("MSBOT_GITCODE_TOKEN", "synthetic-platform-token")
     monkeypatch.setenv("MSBOT_GITCODE_WEBHOOK_SECRET", "synthetic-webhook-password")
@@ -47,11 +49,20 @@ def test_http_flow_uses_upstream_services_and_later_comment_page(tmp_path, monke
     removal_route = respx_mock.delete(f"{API}/repos/owner/repo/issues/42/labels/resolved").respond(
         200, json={}
     )
-    app = create_app(Settings(tmp_path / "audit.sqlite3", "https://msbot.example.test"), start_worker=False)
+    settings = Settings(
+        tmp_path / "audit.sqlite3",
+        "https://msbot.example.test",
+        gitcode=GitCodeDefaults() if unified else None,
+    )
+    app = create_app(settings, start_worker=False)
     with TestClient(app) as client:
-        registered = client.post("/api/repos", json=registration(str(uuid.uuid4())), headers=ADMIN).json()
-        repo = registered["data"]["result"]
-        response = client.post(f"/hooks/gitcode/{repo['id']}", json=event_payload(), headers=headers())
+        if unified:
+            webhook_url = "/hooks/gitcode"
+        else:
+            registered = client.post("/api/repos", json=registration(str(uuid.uuid4())), headers=ADMIN).json()
+            webhook_url = f"/hooks/gitcode/{registered['data']['result']['id']}"
+        response = client.post(webhook_url, json=event_payload(), headers=headers())
+        assert response.status_code == 202
         identity = response.json()["data"]["id"]
         app.state.engine.run_once()
         result = app.state.store.job_get(identity)
@@ -69,7 +80,7 @@ def test_http_flow_uses_upstream_services_and_later_comment_page(tmp_path, monke
 
         removal_route.mock(side_effect=remove)
         payload = event_payload() | {"uuid": "new-label-add-event"}
-        response = client.post(f"/hooks/gitcode/{repo['id']}", json=payload, headers=headers("delivery-2"))
+        response = client.post(webhook_url, json=payload, headers=headers("delivery-2"))
         app.state.engine.run_once()
         assert app.state.store.job_get(response.json()["data"]["id"])["removal"] == "confirmed"
         assert labels == ["bug", "other"]
@@ -78,12 +89,16 @@ def test_http_flow_uses_upstream_services_and_later_comment_page(tmp_path, monke
 
 def test_instance_configuration_requires_environment_references(tmp_path, monkeypatch):
     monkeypatch.setenv("MSBOT_ADMIN_TOKEN", "synthetic-admin")
+    monkeypatch.setenv("MSBOT_GITCODE_TOKEN", "synthetic-token")
+    monkeypatch.setenv("MSBOT_GITCODE_WEBHOOK_SECRET", "synthetic-webhook-password")
     monkeypatch.setenv("MSBOT_FEISHU_URL", "https://open.feishu.cn/open-apis/bot/v2/hook/synthetic")
     monkeypatch.setenv("MSBOT_FEISHU_SECRET", "synthetic-signing-secret")
     source = (Path(__file__).resolve().parents[1] / "examples/instance.yaml").read_text()
-    source = source.replace("# ", "")
-    # The explanatory comment is kept a comment while the example connection is enabled.
-    source = "\n".join(line for line in source.splitlines() if "可选。" not in line)
+    # Enable only the optional connection block, leaving explanatory comments intact.
+    source = "\n".join(
+        line.removeprefix("# ") if line.startswith(("# feishu:", "#   ")) else line
+        for line in source.splitlines()
+    )
     path = tmp_path / "instance.yaml"
     path.write_text(source, encoding="utf-8")
     settings = Settings.load(str(path))

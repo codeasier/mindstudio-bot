@@ -1,6 +1,6 @@
 # Bug Issue 关闭审计：安装与使用
 
-这是当前唯一实现的业务案例。Python 服务持续接收 GitCode Issue Hook；Go CLI 管理接入和查询；平台请求直接复用 `gitcode-cli` 服务层。
+这是当前唯一实现的业务案例。Python 服务持续接收 GitCode Issue Hook；仓库接入只需已认证 Webhook 和默认分支中的有效 `.msbot/config.yaml`，无需预先 `repo add`。Go CLI 提供查询和原有接入管理；平台请求直接复用 `gitcode-cli` 服务层。
 
 ## 1. 被纳管 GitCode 仓库配置
 
@@ -71,6 +71,10 @@ go build -o ./msbot ./cmd/msbot
 database: /var/lib/msbot/audit.sqlite3
 public_url: https://msbot.example.com
 admin_token_env: MSBOT_ADMIN_TOKEN
+gitcode:
+  token_env: MSBOT_GITCODE_TOKEN
+  webhook_secret_env: MSBOT_GITCODE_WEBHOOK_SECRET
+  webhook_mode: password
 feishu:
   engineering:
     url_env: MSBOT_FEISHU_URL
@@ -79,6 +83,8 @@ feishu:
     secret_env: MSBOT_FEISHU_SECRET
 ```
 
+`gitcode` 定义统一入口 `/hooks/gitcode` 使用的默认账户与认证方式；`webhook_mode` 为 `password` 或 `signature`，默认 `password`。环境变量名可自定义，部署时必须提供对应值；省略 `gitcode` 整段时统一入口返回 503，已有带仓库 ID 的入口仍可使用。
+
 飞书连接整体可省略。`repositories` 由实例管理员列出允许使用该连接的仓库；仓内引用不能扩大此范围。未开启关键词或签名时，分别省略 `keywords` 或 `secret_env`。在仓库入口增加 `notification: engineering` 才选择该连接。
 
 配置以下环境变量，值由部署者填写：
@@ -86,14 +92,14 @@ feishu:
 | 环境变量 | 用途 |
 |---|---|
 | `MSBOT_ADMIN_TOKEN` | 本案例管理 API 的实例管理员 Bearer Token |
-| `MSBOT_GITCODE_TOKEN` | 接入账户的 GitCode Token；需能读仓库／评论、删除 Issue 标签；自动建 Hook 还需 Hook 管理权限 |
-| `MSBOT_GITCODE_WEBHOOK_SECRET` | 为该仓库 Webhook 配置的密码或签名密钥 |
+| `MSBOT_GITCODE_TOKEN` | 默认账户的 GitCode Token；需能读目标仓库／评论、删除 Issue 标签；使用旧 CLI 自动建 Hook 时还需 Hook 管理权限 |
+| `MSBOT_GITCODE_WEBHOOK_SECRET` | 统一入口的密码或签名密钥，在各目标仓库的 Webhook 中填写相同值 |
 | `MSBOT_FEISHU_URL` | 可选，飞书自定义机器人完整 Webhook URL |
 | `MSBOT_FEISHU_SECRET` | 可选，飞书机器人安全设置中的签名密钥 |
 
 飞书消息正文包含配置的全部关键词。签名使用秒级 timestamp，加换行与 secret 作为 HMAC-SHA256 的 key，对空消息计算后 Base64；密钥不出现在消息正文或审计结果中。机器人 URL 和安全设置须与飞书侧配置一致。
 
-本案例采用实例管理员引导接入；此前讨论的完整 OAuth／逐仓操作者管理产品尚未实现。
+本案例采用实例侧默认账户处理统一入口事件，管理 API 仍使用实例管理员凭据；完整 OAuth／逐仓操作者管理产品尚未实现。
 
 ## 4. 启动与接入
 
@@ -105,14 +111,32 @@ feishu:
 
 默认监听 `127.0.0.1:8080`，外部 HTTPS 入口转发至此地址。启动一个服务进程即可；数据库锁阻止多个后台 worker 同时使用同一状态库。
 
+### 轻量接入：Webhook + 仓内配置
+
+实例已配置 `gitcode` 后，在目标 GitCode 仓库的项目设置 → WebHook 中填写：
+
+- URL：`https://<Bot 域名>/hooks/gitcode`，各仓库使用同一 URL。
+- 事件：Issue 事件；请求格式：JSON。
+- 认证：密码或签名密钥，与实例的 `webhook_mode` 和对应密钥一致。
+
+确认仓库默认分支已提交第 1 节的配置和模板，并启用审计，即可通过新增 `resolved` 触发处理。**无需执行 `repo add`，也无需在实例中维护接入仓库名单。** 飞书连接仍按其 `repositories` 独立授权。
+
+认证成功后，Bot 从事件读取仓库路径和稳定项目 ID，并只查本地记录。记录已存在、状态为 `active` 且项目 ID 一致时直接持久受理并返回 202，这次请求不再访问 GitCode。本地没有该仓库时，先写入 `pending` 记录和 `queued` 任务再返回 202；现有单个 worker 随后用默认账户读取 GitCode 项目 ID。核对失败则把任务标为 `ignored`（`repository_unverified`），不改标签、不发通知，也不把记录升为 `active`。不会自动创建远端 Hook。路径或 ID 非法返回 400，认证失败返回 401。与已有记录的项目 ID 不一致，或记录不是 `active`／`pending`，返回 409，且不访问 GitCode。
+
+202 表示已持久受理，具体审计结果通过任务查询查看：配置不存在或任务未启用会记录 `ignored`，初次配置／模板非法记录 `failed`，均不会删标或通知；后续补齐配置后，新事件即可处理。合法更新、非法更新回退及入口删除停用沿用第 1 节行为。
+
+已有 active 内部记录会被复用，不改写其凭据、Hook ID 或配置快照，即使 Token 环境变量引用与当前实例默认值不同。若既有记录的项目 ID 不一致，或记录既不是 `active` 也不是待核对的 `pending`，统一入口返回 409；该仓库可继续使用原有专属入口。同一仓库跨两种入口的重复投递共享防重记录。
+
+### 查询与原有逐仓接入
+
 在 CLI 环境设置 `MSBOT_URL`（本地默认 `http://127.0.0.1:8080`）和同一个 `MSBOT_ADMIN_TOKEN`，再执行：
 
 ```sh
-./msbot repo add owner/repo
 ./msbot repo list
+./msbot task list
 ```
 
-`repo add` 绑定仓库身份、加载配置并创建仅订阅 Issue 事件的 GitCode Webhook。默认密码模式；可用 `--signature` 选择 GitCode 签名密钥模式。其他仓库可用不同的实例环境变量：
+此前的逐仓接入方式继续支持：`repo add` 绑定仓库身份、加载配置并创建仅订阅 Issue 事件、带仓库 ID URL 的 GitCode Webhook。默认密码模式；可用 `--signature` 选择 GitCode 签名密钥模式。需要单独指定账户或密钥时可用不同的实例环境变量：
 
 ```sh
 ./msbot repo add owner/another-repo \
@@ -138,7 +162,7 @@ CLI 发起接入前在用户缓存目录的 `msbot/operations/` 保存操作 ID 
 
 ## 5. 审计流程与结果
 
-1. 校验 Webhook 密码／签名、项目路径和稳定项目 ID；持久保存投递后返回 202。
+1. 校验 Webhook 密码／签名、项目路径和稳定项目 ID。统一入口先按本地记录受理并返回 202：已登记且项目 ID 一致时不再访问 GitCode；未登记则写入待核对任务，由单个 worker 再读取 GitCode。核对失败只把该任务标为忽略。
 2. 只有 Issue update 的明确标签差异新增 resolved 才入队。同仓 delivery ID 或事件 uuid 重复均复用记录；同标识不同正文冲突。
 3. 审计开始时绑定配置与模板快照；重新读取当前 Issue，缺少 bug 或 resolved 时忽略。
 4. 完整分页读取评论，逐条验证模板；合格则保留标签。
@@ -188,7 +212,9 @@ sudo systemctl status msbot
 
 ## 7. 已验证与待真实验收
 
-离线测试覆盖真实上游服务的 HTTP 请求、超过一页的评论、合法／缺失／错误选项评论、精确删标、重复投递、跨项目拒绝、鉴权、配置回退、重启恢复、飞书签名与错误响应，以及 Go CLI 接入回执。
+离线测试覆盖真实上游服务的 HTTP 请求、超过一页的评论、合法／缺失／错误选项评论、精确删标、重复投递、跨项目拒绝、鉴权、配置回退、重启恢复、飞书签名与错误响应，以及 Go CLI 接入回执。统一入口新增覆盖免登记首次接入、密码／签名先于上游读取、已登记仓库的本地受理、未登记仓库延后核对、身份核实失败不改标签、并发首投、多仓隔离、跨入口防重、配置缺失／非法／后续补齐及飞书授权；两种入口均通过实际上游服务的 mock HTTP 完整处理链路。
+
+统一入口已于 2026-10-29 部署，公网健康、缺失／错误密码拒绝、正确密码校验、通过实际 GitCode 仓库服务核实身份后的持久受理及重复投递防重均已验证。受理探测使用显式的不可执行业务的合成事件，记录为 `ignored`，未执行删标或通知；尚不代表未预登记仓库的真实首次回调验收。下述真实业务验收使用此前带仓库 ID 的入口。
 
 ### 真实仓库验收（2026-10-29）
 

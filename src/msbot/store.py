@@ -120,6 +120,75 @@ class Store:
             except sqlite3.IntegrityError as exc:
                 raise Conflict("Repository is already registered") from exc
 
+    def accept_unified(
+        self,
+        name: str,
+        project_id: str,
+        credentials: dict,
+        delivery: str,
+        digest: str,
+        payload: dict,
+        number,
+        reason: str | None,
+    ):
+        """Accept a unified delivery without contacting GitCode.
+
+        An active row with the same project id is reused as-is. An unknown repository is stored
+        as pending and its task stays queued until the worker verifies the project id.
+        """
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM repos WHERE name=?", (name,)).fetchone()
+            if row is None:
+                repo_id = str(uuid.uuid4())
+                db.execute(
+                    "INSERT INTO repos(id, name, project_id, token_env, webhook_secret_env, "
+                    "webhook_mode, status) VALUES(?, ?, ?, ?, ?, ?, 'pending')",
+                    (
+                        repo_id,
+                        name,
+                        project_id,
+                        credentials["token_env"],
+                        credentials["webhook_secret_env"],
+                        credentials["webhook_mode"],
+                    ),
+                )
+                defer = True
+            elif row["project_id"] != project_id or row["status"] not in {"active", "pending"}:
+                raise Conflict("Repository discovery conflicts with an existing binding")
+            else:
+                repo_id = row["id"]
+                defer = row["status"] == "pending"
+            event_key = payload.get("uuid")
+            if not isinstance(event_key, str) or not event_key or len(event_key) > 200:
+                event_key = None
+            existing = db.execute(
+                "SELECT * FROM jobs WHERE repo_id=? AND (delivery=? OR event_key=?)",
+                (repo_id, delivery, event_key),
+            ).fetchone()
+            if existing:
+                if existing["request_hash"] != digest:
+                    raise Conflict("Delivery identifier was already used with a different body")
+                return self.public_job(decoded(existing)), True
+            identity = str(uuid.uuid4())
+            db.execute(
+                "INSERT INTO jobs(id, repo_id, delivery, event_key, request_hash, payload, "
+                "issue_number, status, reason) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    identity,
+                    repo_id,
+                    delivery,
+                    event_key,
+                    digest,
+                    encoded(payload),
+                    number,
+                    "queued" if defer or not reason else "ignored",
+                    reason,
+                ),
+            )
+        return self.job_get(identity), False
+
     def repo_update(self, identity: str, **values):
         allowed = {"status", "webhook_id", "config", "config_error"}
         if not values or set(values) - allowed:
@@ -170,7 +239,8 @@ class Store:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT jobs.* FROM jobs JOIN repos ON jobs.repo_id=repos.id "
-                "WHERE jobs.status='queued' AND repos.status='active' ORDER BY jobs.rowid LIMIT 1"
+                "WHERE jobs.status='queued' AND repos.status IN ('active', 'pending') "
+                "ORDER BY jobs.rowid LIMIT 1"
             ).fetchone()
             if row is None:
                 return None
