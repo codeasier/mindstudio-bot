@@ -85,16 +85,16 @@ tester_authors:
 feishu:
   engineering:
     url_env: MSBOT_FEISHU_URL
-    repositories: ["owner/repo"]
     keywords: ["Bug关闭审计"]
     secret_env: MSBOT_FEISHU_SECRET
+    # default: true
 ```
 
 `gitcode` 定义统一入口 `/hooks/gitcode` 使用的默认账户与认证方式；`webhook_mode` 为 `password` 或 `signature`，默认 `password`。环境变量名可自定义，部署时必须提供对应值；省略 `gitcode` 整段时统一入口返回 503，已有带仓库 ID 的入口仍可使用。
 
 `tester_authors` 是实例上的组织测试同学名单，填写 GitCode 登录名，1 到 500 人，不区分大小写。仓库启用关单审计后，这些账号提单必须审计。仓库若再配置 `authors`，有效名单是两边的交集：不在测试名单里的登录名不会被审计，测试名单里被仓库名单排除的账号也不会被审计。仓库省略 `authors` 时，有效名单就是完整的 `tester_authors`。
 
-飞书连接整体可省略。`repositories` 由实例管理员列出允许使用该连接的仓库；仓内引用不能扩大此范围。未开启关键词或签名时，分别省略 `keywords` 或 `secret_env`。在仓库入口增加 `notification: engineering` 才选择该连接。
+飞书连接整体可省略。仓库配置中的 `notification` 用于选择连接；未匹配到连接时使用标记为 `default: true` 的连接（最多一个），没有默认连接时使用第一个。连接不保存 URL 或密钥，未开启关键词或签名时分别省略 `keywords` 或 `secret_env`。通知配置异常只跳过飞书发送，不阻塞审计和标签操作。
 
 配置以下环境变量，值由部署者填写：
 
@@ -128,7 +128,7 @@ feishu:
 - 事件：Issue 事件；请求格式：JSON。
 - 认证：密码或签名密钥，与实例的 `webhook_mode` 和对应密钥一致。
 
-确认仓库默认分支已提交第 1 节的配置和模板，并启用审计，即可通过新增 `resolved` 触发处理。**无需执行 `repo add`，也无需在实例中维护接入仓库名单。** 飞书连接仍按其 `repositories` 独立授权。
+确认仓库默认分支已提交第 1 节的配置和模板，并启用审计，即可通过新增 `resolved` 触发处理。**无需执行 `repo add`，也无需在实例中维护接入仓库名单。** 仓库配置了 `notification` 且实例存在对应连接或默认连接时发送飞书通知；通知失败不影响审计和撤标。
 
 认证成功后，Bot 从事件读取仓库路径和稳定项目 ID，并只查本地记录。记录已存在、状态为 `active` 且项目 ID 一致时直接持久受理并返回 202，这次请求不再访问 GitCode。本地没有该仓库时，先写入 `pending` 记录和 `queued` 任务再返回 202；现有单个 worker 随后用默认账户读取 GitCode 项目 ID。核对失败则把任务标为 `ignored`（`repository_unverified`），不改标签、不发通知，也不把记录升为 `active`。同一路径上的另一个未核实项目 ID 会另存一行 `pending`，不覆盖已有候选的项目 ID；worker 只把与 GitCode 一致的那一行升为 `active`，旧候选上的任务仍不可执行。不会自动创建远端 Hook。路径或 ID 非法返回 400，认证失败返回 401。与已有 `active` 记录的项目 ID 不一致，或记录不是 `active`／`pending`，返回 409，且不访问 GitCode。
 
@@ -205,7 +205,7 @@ GitCode 幂等读取遇到 `NetworkError`、HTTP 429 或 5xx 时最多尝试 **3
 
 故障诊断记录在 `result.error`，使用 `type`、`cause_type`、`message`、`status_code`、`trace_id`、`request_id`、`retryable` 表达固定错误分类和可用元数据。`message` 是固定分类说明，不是服务器原文；HTTP 状态码和 trace 元数据仅在可用且通过校验时保留，不保存任意异常原文、请求 URL、响应正文或 Token。当前上游 `APIError` 不保留 trace，因而这类错误可能只有分类和 HTTP 状态码；不能把缺少 trace 解释为没有发生上游请求。
 
-审计执行失败会记录日志，并可发送独立飞书告警。告警只使用该仓库有效配置已绑定、且实例 `feishu.<name>.repositories` 明确授权给该仓库的连接。尚不能确认绑定时只记录日志和统计，不猜测机器人，也不向其他仓库的机器人发送。告警包含任务 ID、仓库、Issue 和安全诊断，便于管理员定位。
+审计执行失败会记录日志，并可发送独立飞书告警。告警使用仓库配置选择的连接；未匹配时使用默认连接。通知失败只记录通知状态，不改写审计结果。告警包含任务 ID、仓库、Issue 和安全诊断，便于管理员定位。
 
 失败告警状态单独记录在 `failure_notification`，取值同样为 `none`、`sending`、`sent`、`failed`、`unknown`；它不改写标签删除状态 `removal` 或标签删除后的通知状态 `notification`。失败告警发送失败或结果未知不会把原 `failed` 任务变成成功，也不会自动重发告警。
 

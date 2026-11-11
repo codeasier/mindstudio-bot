@@ -141,7 +141,7 @@ def test_concurrent_retry_has_one_durable_receipt_and_child(rig):
 @pytest.mark.parametrize("outcome", ["sent", "failed", "unknown"])
 def test_failure_alert_preserves_audit_failure_and_never_auto_resends(rig, outcome):
     _, store, engine, platform = rig
-    engine.settings.feishu["team"] = FeishuConnection("FEISHU_URL", repositories=("owner/repo",))
+    engine.settings.feishu["team"] = FeishuConnection("FEISHU_URL")
     platform.config += "    notification: team\n"
     messages = []
 
@@ -166,19 +166,20 @@ def test_failure_alert_preserves_audit_failure_and_never_auto_resends(rig, outco
     assert len(messages) == 1
 
 
-def test_revoked_failure_alert_binding_is_not_used(rig):
+def test_failure_alert_uses_default_connection_for_unknown_name(rig):
     _, store, engine, platform = rig
-    engine.settings.feishu["team"] = FeishuConnection("FEISHU_URL", repositories=("owner/repo",))
-    platform.config += "    notification: team\n"
-    repo = onboard(rig)
-    engine.settings.feishu["team"] = FeishuConnection("FEISHU_URL", repositories=("other/repo",))
+    engine.settings.feishu["default"] = FeishuConnection("DEFAULT_URL", default=True)
+    platform.config += "    notification: unknown\n"
     messages = []
-    engine.notify = lambda *args: messages.append(args)
+    engine.notify = lambda connection, message: messages.append(connection)
+    repo = onboard(rig)
+    platform.comment_error = APIError("synthetic", 503)
     job = submit(rig, repo)
     engine.run_once()
-    assert store.job_get(job["id"])["status"] == "failed"
-    assert store.job_get(job["id"])["failure_notification"] == "none"
-    assert not messages
+    result = store.job_get(job["id"])
+    assert result["status"] == "failed"
+    assert result["failure_notification"] == "sent"
+    assert [connection.url_env for connection in messages] == ["DEFAULT_URL"]
 
 
 def test_no_cached_configuration_preserves_underlying_api_error(rig):
@@ -222,7 +223,7 @@ def test_legacy_jobs_additive_migration_preserves_records(rig):
 
 def test_write_outcome_unknown_has_diagnostics_alert_and_cannot_retry(rig):
     _, store, engine, platform = rig
-    engine.settings.feishu["team"] = FeishuConnection("FEISHU_URL", repositories=("owner/repo",))
+    engine.settings.feishu["team"] = FeishuConnection("FEISHU_URL")
     platform.config += "    notification: team\n"
     messages = []
     engine.notify = lambda *args: messages.append(args)
@@ -244,7 +245,7 @@ def test_write_outcome_unknown_has_diagnostics_alert_and_cannot_retry(rig):
 
 def test_failure_and_alert_intent_are_atomic_before_external_call(rig, monkeypatch):
     _, store, engine, platform = rig
-    engine.settings.feishu["team"] = FeishuConnection("FEISHU_URL", repositories=("owner/repo",))
+    engine.settings.feishu["team"] = FeishuConnection("FEISHU_URL")
     platform.config += "    notification: team\n"
     messages = []
     engine.notify = lambda *args: messages.append(args)

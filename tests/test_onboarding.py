@@ -548,14 +548,19 @@ def test_unified_route_preserves_bundle_fallback_and_entry_deletion(unified_rig)
     assert not platform.removals
 
 
-def test_notification_cannot_bypass_existing_repository_authorization(unified_rig):
+def test_notification_connection_does_not_block_unified_audit(unified_rig):
     _, store, engine, platform, _ = unified_rig
-    engine.settings.feishu["team"] = FeishuConnection("FEISHU_URL", repositories=("other/repo",))
+    engine.settings.feishu["team"] = FeishuConnection("FEISHU_URL")
     platform.config += "    notification: team\n"
+    messages = []
+    engine.notify = lambda connection, message: messages.append(connection)
     job = receive(unified_rig)["data"]
     engine.run_once()
-    assert store.job_get(job["id"])["status"] == "failed"
-    assert not platform.removals
+    result = store.job_get(job["id"])
+    assert result["status"] == "rejected"
+    assert result["removal"] == "confirmed"
+    assert len(messages) == 1
+    assert platform.removals == ["42"]
 
 
 def test_delivery_is_deduplicated_across_routes_and_restart(unified_rig):

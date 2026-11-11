@@ -8,7 +8,7 @@ import uuid
 from gitcode_cli.errors import APIError
 
 from . import feishu
-from .config import ConfigurationError, Settings, audit_configuration, secret, text
+from .config import ConfigurationError, FeishuConnection, Settings, audit_configuration, secret, text
 from .diagnostics import error_details
 from .events import issue_author_login, label_names
 from .forms import IssueForm
@@ -42,12 +42,11 @@ class Engine:
         authors = audit.get("authors")
         return authors is None or folded in authors
 
-    def check_notification_binding(self, repo: dict, bundle: dict):
-        name = bundle["audit"].get("notification")
-        if name:
-            connection = self.settings.feishu.get(name)
-            if connection is None or repo["name"] not in connection.repositories:
-                raise ConfigurationError("Notification connection is not available to this repository")
+    def notification_connection(self, audit: dict) -> FeishuConnection | None:
+        name = audit.get("notification")
+        if not name:
+            return None
+        return self.settings.feishu.get(name) or self.settings.default_feishu
 
     def load_bundle(self, repo: dict, platform) -> dict | None:
         try:
@@ -71,7 +70,6 @@ class Engine:
             audit = audit_configuration(source)
             bundle = {"revision": revision, "audit": audit, "template": ""}
             if audit["enabled"]:
-                self.check_notification_binding(repo, bundle)
                 bundle["template"] = platform.file_text(audit["template"], revision)
                 IssueForm.parse(bundle["template"])
             self.store.repo_update(repo["id"], config=bundle, config_error=None)
@@ -79,9 +77,7 @@ class Engine:
         except Exception as exc:
             self.store.repo_update(repo["id"], config_error=f"config_refresh_failed: {type(exc).__name__}")
             if repo.get("config") is not None:
-                previous = repo["config"]
-                self.check_notification_binding(repo, previous)
-                return previous
+                return repo["config"]
             raise ConfigurationError("No valid audit configuration is available") from exc
 
     def register(self, operation_id: str, request: dict) -> dict:
@@ -223,7 +219,6 @@ class Engine:
                 self.store.job_update(job["id"], status="ignored", reason="audit_disabled")
                 return True
             self.store.job_update(job["id"], snapshot=bundle)
-            self.check_notification_binding(repo, bundle)
             if job["removal"] == "confirmed":
                 self.finish_notification(job, repo, bundle, job["result"])
                 return True
@@ -298,13 +293,9 @@ class Engine:
         # Unexpected exceptions after an external call must never become manually retryable.
         status = "failed" if current["removal"] == current["notification"] == "none" else "blocked"
         bundle = bundle or (repo.get("config") if repo else None)
-        name = None
+        connection = None
         if repo and bundle and current["failure_notification"] == "none":
-            try:
-                self.check_notification_binding(repo, bundle)
-                name = bundle["audit"].get("notification")
-            except ConfigurationError:
-                pass
+            connection = self.notification_connection(bundle["audit"])
         # Persist the decision and sending marker atomically. A crash is then
         # visible as unknown on recovery, never silently none or auto-replayed.
         self.store.job_update(
@@ -312,10 +303,10 @@ class Engine:
             status=status,
             reason=reason or f"audit_failed: {type(exc).__name__}",
             result=(current.get("result") or {}) | {"error": details},
-            failure_notification="sending" if name else current["failure_notification"],
+            failure_notification="sending" if connection else current["failure_notification"],
         )
         log.error("Audit %s %s: %s", job["id"], status, details)
-        if name is None:
+        if connection is None:
             return
         message = "\n".join(
             [
@@ -328,7 +319,7 @@ class Engine:
             ]
         )
         try:
-            self.notify(self.settings.feishu[name], message)
+            self.notify(connection, message)
         except feishu.NotificationRejected:
             self.store.job_update(job["id"], failure_notification="failed")
         except Exception:
@@ -337,8 +328,8 @@ class Engine:
             self.store.job_update(job["id"], failure_notification="sent")
 
     def finish_notification(self, job: dict, repo: dict, bundle: dict, result: dict):
-        name = bundle["audit"].get("notification")
-        if not name:
+        connection = self.notification_connection(bundle["audit"])
+        if connection is None:
             self.store.job_update(job["id"], status="rejected", reason="invalid_close_registration")
             return
         message = "\n".join(
@@ -354,7 +345,7 @@ class Engine:
         )
         self.store.job_update(job["id"], notification="sending")
         try:
-            self.notify(self.settings.feishu[name], message)
+            self.notify(connection, message)
         except feishu.NotificationRejected:
             self.store.job_update(
                 job["id"],

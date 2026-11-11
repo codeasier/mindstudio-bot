@@ -275,9 +275,7 @@ def test_missing_entry_disables_old_bundle(rig):
 
 def test_feishu_sent_only_after_confirmed_removal(rig):
     _, store, engine, platform = rig
-    engine.settings.feishu["team"] = FeishuConnection(
-        "FEISHU_URL", ("安全关键词",), repositories=("owner/repo",)
-    )
+    engine.settings.feishu["team"] = FeishuConnection("FEISHU_URL", ("安全关键词",))
     platform.config += "    notification: team\n"
     messages = []
 
@@ -297,7 +295,7 @@ def test_feishu_sent_only_after_confirmed_removal(rig):
 
 def test_notification_failure_does_not_undo_removal(rig):
     _, store, engine, platform = rig
-    engine.settings.feishu["team"] = FeishuConnection("FEISHU_URL", repositories=("owner/repo",))
+    engine.settings.feishu["team"] = FeishuConnection("FEISHU_URL")
     platform.config += "    notification: team\n"
 
     def reject(*_args):
@@ -316,7 +314,7 @@ def test_notification_failure_does_not_undo_removal(rig):
 
 def test_unknown_notification_blocks_without_resend(rig):
     _, store, engine, platform = rig
-    engine.settings.feishu["team"] = FeishuConnection("FEISHU_URL", repositories=("owner/repo",))
+    engine.settings.feishu["team"] = FeishuConnection("FEISHU_URL")
     platform.config += "    notification: team\n"
 
     def unknown(*_args):
@@ -331,22 +329,49 @@ def test_unknown_notification_blocks_without_resend(rig):
     assert not engine.run_once()
 
 
-def test_notification_connection_cannot_be_selected_by_another_repository(rig):
-    client, _, engine, platform = rig
-    engine.settings.feishu["team"] = FeishuConnection("FEISHU_URL", repositories=("other/repo",))
-    platform.config += "    notification: team\n"
-    response = client.post("/api/repos", json=registration(str(uuid.uuid4())), headers=ADMIN)
-    assert response.json()["data"]["status"] == "failed"
-    assert not platform.removals
-
-
-def test_revoked_notification_binding_does_not_reuse_old_authorization(rig):
+def test_notification_connection_is_not_limited_by_repository(rig):
     _, store, engine, platform = rig
-    engine.settings.feishu["team"] = FeishuConnection("FEISHU_URL", repositories=("owner/repo",))
+    engine.settings.feishu["team"] = FeishuConnection("FEISHU_URL")
+    platform.config += "    notification: team\n"
+    messages = []
+    engine.notify = lambda connection, message: messages.append(connection)
+    repo = onboard(rig)
+    job = submit(rig, repo)
+    engine.run_once()
+    result = store.job_get(job["id"])
+    assert result["status"] == "rejected"
+    assert result["notification"] == "sent"
+    assert result["removal"] == "confirmed"
+    assert len(messages) == 1
+    assert platform.removals == ["42"]
+
+
+def test_unknown_notification_uses_default_connection(rig):
+    _, store, engine, platform = rig
+    engine.settings.feishu["default"] = FeishuConnection("DEFAULT_URL", default=True)
+    engine.settings.feishu["team"] = FeishuConnection("TEAM_URL")
+    platform.config += "    notification: unknown\n"
+    messages = []
+    engine.notify = lambda connection, message: messages.append(connection)
+    repo = onboard(rig)
+    job = submit(rig, repo)
+    engine.run_once()
+    result = store.job_get(job["id"])
+    assert result["status"] == "rejected"
+    assert result["notification"] == "sent"
+    assert result["removal"] == "confirmed"
+    assert [connection.url_env for connection in messages] == ["DEFAULT_URL"]
+    assert platform.removals == ["42"]
+
+
+def test_missing_notification_connection_does_not_block_audit(rig):
+    _, store, engine, platform = rig
     platform.config += "    notification: team\n"
     repo = onboard(rig)
     job = submit(rig, repo)
-    engine.settings.feishu["team"] = FeishuConnection("FEISHU_URL", repositories=("other/repo",))
     engine.run_once()
-    assert store.job_get(job["id"])["status"] == "failed"
-    assert not platform.removals
+    result = store.job_get(job["id"])
+    assert result["status"] == "rejected"
+    assert result["removal"] == "confirmed"
+    assert result["notification"] == "none"
+    assert platform.removals == ["42"]

@@ -131,7 +131,7 @@ class FeishuConnection:
     url_env: str
     keywords: tuple[str, ...] = ()
     secret_env: str | None = None
-    repositories: tuple[str, ...] = ()
+    default: bool = False
 
     def url(self) -> str:
         value = secret(self.url_env)
@@ -167,6 +167,13 @@ class Settings:
     tester_authors: tuple[str, ...] = ()
     gitcode: GitCodeDefaults | None = None
 
+    @property
+    def default_feishu(self) -> FeishuConnection | None:
+        for connection in self.feishu.values():
+            if connection.default:
+                return connection
+        return next(iter(self.feishu.values()), None)
+
     @classmethod
     def load(cls, path: str) -> Settings:
         root = mapping(
@@ -189,27 +196,29 @@ class Settings:
         entries = root.get("feishu", {})
         if not isinstance(entries, dict):
             raise ConfigurationError("feishu must be a mapping of connection names")
+        defaults = 0
         for name, entry in entries.items():
             text(name, "connection name")
-            entry = mapping(
-                entry, {"url_env", "keywords", "secret_env", "repositories"}, {"url_env", "repositories"}
-            )
+            entry = mapping(entry, {"url_env", "keywords", "secret_env", "default"}, {"url_env"})
             keywords = entry.get("keywords", [])
             if not isinstance(keywords, list) or len(keywords) > 10:
                 raise ConfigurationError("keywords must contain at most ten strings")
-            repositories = entry["repositories"]
-            if not isinstance(repositories, list) or not repositories:
-                raise ConfigurationError("Notification connections must list their allowed repositories")
+            default = entry.get("default", False)
+            if type(default) is not bool:
+                raise ConfigurationError("default must be a boolean")
+            defaults += default
             connection = FeishuConnection(
                 env_name(entry["url_env"]),
                 tuple(text(k, "keyword") for k in keywords),
                 env_name(entry["secret_env"]) if entry.get("secret_env") is not None else None,
-                tuple(repository_name(repo) for repo in repositories),
+                default,
             )
             connection.url()
             if connection.secret_env:
                 secret(connection.secret_env)
             connections[name] = connection
+        if defaults > 1:
+            raise ConfigurationError("At most one Feishu connection may be the default")
         admin_env = env_name(root.get("admin_token_env", "MSBOT_ADMIN_TOKEN"))
         secret(admin_env)
         testers = tuple(gitcode_logins(root["tester_authors"], name="tester_authors", limit=500))
