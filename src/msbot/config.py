@@ -131,6 +131,7 @@ class FeishuConnection:
     url_env: str
     keywords: tuple[str, ...] = ()
     secret_env: str | None = None
+    repositories: tuple[str, ...] = ()
     default: bool = False
 
     def url(self) -> str:
@@ -197,12 +198,23 @@ class Settings:
         if not isinstance(entries, dict):
             raise ConfigurationError("feishu must be a mapping of connection names")
         defaults = 0
+        mapped = set()
         for name, entry in entries.items():
             text(name, "connection name")
-            entry = mapping(entry, {"url_env", "keywords", "secret_env", "default"}, {"url_env"})
+            entry = mapping(
+                entry, {"url_env", "keywords", "secret_env", "repositories", "default"}, {"url_env"}
+            )
             keywords = entry.get("keywords", [])
             if not isinstance(keywords, list) or len(keywords) > 10:
                 raise ConfigurationError("keywords must contain at most ten strings")
+            repositories = entry.get("repositories", [])
+            if not isinstance(repositories, list):
+                raise ConfigurationError("repositories must be a list")
+            names = tuple(repository_name(repo) for repo in repositories)
+            duplicate = mapped.intersection(names)
+            if duplicate:
+                raise ConfigurationError("Repository is mapped to more than one Feishu connection")
+            mapped.update(names)
             default = entry.get("default", False)
             if type(default) is not bool:
                 raise ConfigurationError("default must be a boolean")
@@ -211,6 +223,7 @@ class Settings:
                 env_name(entry["url_env"]),
                 tuple(text(k, "keyword") for k in keywords),
                 env_name(entry["secret_env"]) if entry.get("secret_env") is not None else None,
+                names,
                 default,
             )
             connection.url()

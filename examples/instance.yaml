@@ -14,10 +14,11 @@ gitcode:
 tester_authors:
   - replace-me
 
-# 可选。仓库配置中的 notification 选择连接；未匹配时使用 default 连接。
+# 可选。按仓库名映射飞书连接；仓库配置无需 notification 字段。
 # feishu:
 #   engineering:
 #     url_env: MSBOT_FEISHU_URL
+#     repositories: ["owner/repo"]
 #     keywords: ["Bug关闭审计"]
 #     secret_env: MSBOT_FEISHU_SECRET
 #     # default: true

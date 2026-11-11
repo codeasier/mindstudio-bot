@@ -42,7 +42,10 @@ class Engine:
         authors = audit.get("authors")
         return authors is None or folded in authors
 
-    def notification_connection(self, audit: dict) -> FeishuConnection | None:
+    def notification_connection(self, repo: dict, audit: dict) -> FeishuConnection | None:
+        for connection in self.settings.feishu.values():
+            if repo["name"] in connection.repositories:
+                return connection
         name = audit.get("notification")
         if not name:
             return None
@@ -295,7 +298,7 @@ class Engine:
         bundle = bundle or (repo.get("config") if repo else None)
         connection = None
         if repo and bundle and current["failure_notification"] == "none":
-            connection = self.notification_connection(bundle["audit"])
+            connection = self.notification_connection(repo, bundle["audit"])
         # Persist the decision and sending marker atomically. A crash is then
         # visible as unknown on recovery, never silently none or auto-replayed.
         self.store.job_update(
@@ -328,7 +331,7 @@ class Engine:
             self.store.job_update(job["id"], failure_notification="sent")
 
     def finish_notification(self, job: dict, repo: dict, bundle: dict, result: dict):
-        connection = self.notification_connection(bundle["audit"])
+        connection = self.notification_connection(repo, bundle["audit"])
         if connection is None:
             self.store.job_update(job["id"], status="rejected", reason="invalid_close_registration")
             return

@@ -375,3 +375,33 @@ def test_missing_notification_connection_does_not_block_audit(rig):
     assert result["removal"] == "confirmed"
     assert result["notification"] == "none"
     assert platform.removals == ["42"]
+
+
+def test_instance_repository_mapping_enables_notification_without_config(rig):
+    _, store, engine, platform = rig
+    engine.settings.feishu["team"] = FeishuConnection("FEISHU_URL", repositories=("owner/repo",))
+    messages = []
+    engine.notify = lambda connection, message: messages.append(connection)
+    repo = onboard(rig)
+    job = submit(rig, repo)
+    engine.run_once()
+    result = store.job_get(job["id"])
+    assert result["status"] == "rejected"
+    assert result["removal"] == "confirmed"
+    assert result["notification"] == "sent"
+    assert len(messages) == 1
+    assert platform.removals == ["42"]
+
+
+def test_instance_repository_mapping_overrides_notification_value(rig):
+    _, store, engine, platform = rig
+    engine.settings.feishu["team"] = FeishuConnection("MAPPED_URL", repositories=("owner/repo",))
+    engine.settings.feishu["other"] = FeishuConnection("OTHER_URL")
+    platform.config += "    notification: other\n"
+    messages = []
+    engine.notify = lambda connection, message: messages.append(connection)
+    repo = onboard(rig)
+    submit(rig, repo)
+    engine.run_once()
+    assert [connection.url_env for connection in messages] == ["MAPPED_URL"]
+    assert platform.removals == ["42"]
