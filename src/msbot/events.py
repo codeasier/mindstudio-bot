@@ -65,9 +65,13 @@ def classify(payload: dict, event_header: str, repo: dict) -> tuple[str | None, 
     if attributes.get("action") != "update":
         return number, "not_issue_update"
     changes = payload.get("changes")
-    if not isinstance(changes, dict) or "labels" not in changes:
+    if not isinstance(changes, dict):
         return number, "no_explicit_label_change"
-    delta = changes["labels"]
+    delta = changes.get("labels")
+    if delta is None:
+        delta = changes.get("enterprise_labels")
+    if delta is None:
+        return number, "no_explicit_label_change"
     if not isinstance(delta, dict) or "previous" not in delta or "current" not in delta:
         return number, "unrecognized_label_change"
     try:

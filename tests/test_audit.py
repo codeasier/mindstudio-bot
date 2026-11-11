@@ -97,6 +97,19 @@ def test_unrelated_label_update_does_not_audit(rig):
     assert store.job_get(job["id"])["reason"] == "resolved_not_added"
 
 
+def test_enterprise_labels_change_triggers_audit(rig):
+    _, store, engine, platform = rig
+    repo = onboard(rig)
+    payload = event_payload()
+    payload["changes"] = {"enterprise_labels": payload["changes"]["labels"]}
+    job = submit(rig, repo, payload)
+    engine.run_once()
+    result = store.job_get(job["id"])
+    assert result["status"] == "rejected"
+    assert result["removal"] == "confirmed"
+    assert platform.removals == ["42"]
+
+
 def test_absent_bug_or_resolved_ignored(rig):
     _, store, engine, platform = rig
     repo = onboard(rig)
