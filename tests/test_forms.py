@@ -5,11 +5,51 @@ from msbot.forms import IssueForm
 
 from .conftest import CONFIG, TEMPLATE, VALID_COMMENT
 
+LEGACY_COMMENT = """# 关单说明
+
+| 信息 | 内容 |
+| --- | --- |
+| Commit 或 PR 编号 | 1382 |
+| 里程碑 | 26.3.0 |
+| 是否引入用户可感知变更 | 是 |
+| 可感知变更类型 | 使用方式变化 |
+| 回归包类型 | daily |
+
+## PR 链接
+
+https://gitcode.com/Ascend/msinsight/pull/1382
+
+## 引入缺陷的原因
+
+设计时遗漏
+
+## 变更说明
+
+现在在 Ftrace 被设置为基线数据后，无法设置 Profiling 为对比数据。
+
+## 包名 / 版本号 / 包链接
+
+https://mindstudio-pkg.obs.cn-north-4.myhuaweicloud.com/daily/master/2026-11/20261112_1200/msinsight/windows/MindStudio-Insight_26.3.0.dev20261112_win.exe
+
+## 自测截图与结论
+
+![QQ20261111-113907.gif](https://raw.gitcode.com/user-images/assets/8492996/7f79b77b-eb8e-4fee-a317-1cebe7a6874f/QQ20261111-113907.gif)
+"""
+
 
 def test_user_template_and_complete_registration():
     form = IssueForm.parse(TEMPLATE)
     assert form.validate(VALID_COMMENT) == []
     assert len(form.fields) == 12
+
+
+def test_legacy_quick_comment_table_and_h2_are_supported():
+    assert IssueForm.parse(TEMPLATE).validate(LEGACY_COMMENT) == []
+
+
+def test_legacy_table_value_does_not_hide_missing_fields():
+    comment = LEGACY_COMMENT.replace("| 里程碑 | 26.3.0 |", "| 版本 | 26.3.0 |")
+    assert "里程碑：必填项未填写" in IssueForm.parse(TEMPLATE).validate(comment)
 
 
 def test_generated_blank_registration_is_not_complete():

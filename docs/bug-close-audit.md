@@ -45,6 +45,8 @@ msbot-server render-template .msbot/template/bug-close.yml
 
 填写后作为 **一条 Issue 评论** 提交。字段标题必须保留为 `### 字段名称`，与模板 `attributes.label` 一致。一级／二级标题用于分组，字段内小标题使用四级或更深；仅有标题或空代码围栏不算填写内容。
 
+为兼容 GitCode Quick Comment v1.9 生成的旧格式，校验同时接受 `| 字段名称 | 值 |` 表格行和一级／二级字段标题；旧表格中的复选值可使用 `、` 分隔。新登记仍建议使用 `###`。
+
 - 必填字段不得为空、仅有填写说明，或保留 `_No response_` 等未填标记。
 - input 为单行；textarea 支持多行、代码和图片 Markdown。
 - dropdown 必须填写模板声明的值；单选只能填一个。

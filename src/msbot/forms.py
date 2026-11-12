@@ -94,10 +94,19 @@ class IssueForm:
         return cls(tuple(fields))
 
     def validate(self, comment: str) -> list[str]:
+        labels = {item.label for item in self.fields}
         sections: dict[str, list[str]] = {}
         current: str | None = None
         duplicate: set[str] = set()
         fence: tuple[str, int] | None = None
+
+        def begin(label: str) -> None:
+            nonlocal current
+            current = label
+            if label in sections:
+                duplicate.add(label)
+            sections.setdefault(label, [])
+
         for line in clean(comment).splitlines():
             marker = re.match(r"^\s{0,3}(`{3,}|~{3,})", line)
             if marker:
@@ -106,16 +115,30 @@ class IssueForm:
                     fence = (value[0], len(value))
                 elif value[0] == fence[0] and len(value) >= fence[1]:
                     fence = None
-            if fence is None and re.match(r"^\s{0,3}#{1,2}\s+", line):
-                current = None
+            if fence is not None:
+                if current is not None:
+                    sections[current].append(line)
                 continue
-            heading = None if fence else re.match(r"^\s{0,3}###\s+(.+?)\s*#*\s*$", line)
+            table = re.match(r"^\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*$", line)
+            if table:
+                label = re.sub(r"[*_`]", "", table[1]).strip()
+                if label in labels:
+                    if label in sections:
+                        duplicate.add(label)
+                    sections[label] = [table[2].strip()]
+                    current = None
+                elif current is not None:
+                    sections[current].append(line)
+                continue
+            heading = re.match(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$", line)
             if heading:
-                current = heading[1].strip()
-                if current in sections:
-                    duplicate.add(current)
-                sections.setdefault(current, [])
-            elif current is not None:
+                label = heading[2].strip()
+                if label in labels:
+                    begin(label)
+                else:
+                    current = None
+                continue
+            if current is not None:
                 sections[current].append(line)
         errors = []
         for item in self.fields:
@@ -130,7 +153,7 @@ class IssueForm:
             if item.kind == "input" and len(value.splitlines()) != 1:
                 errors.append(f"{item.label}：应为单行文本")
             elif item.kind == "dropdown":
-                selected = [v.strip() for v in re.split(r"[,\n]", value) if v.strip()]
+                selected = [v.strip() for v in re.split(r"[,\n、]", value) if v.strip()]
                 if (
                     not selected
                     or any(v not in item.options for v in selected)
@@ -139,17 +162,16 @@ class IssueForm:
                 ):
                     errors.append(f"{item.label}：下拉选项不合法")
             elif item.kind == "checkboxes":
-                choices = []
-                invalid = False
-                for line in value.splitlines():
-                    if not line.strip():
-                        continue
-                    match = re.fullmatch(r"\s*[-*]\s+\[([ xX])\]\s+(.+?)\s*", line)
-                    if not match or match[2] not in item.options:
-                        invalid = True
-                        break
-                    if match[1].casefold() == "x":
-                        choices.append(match[2])
+                lines = [line for line in value.splitlines() if line.strip()]
+                matches = [re.fullmatch(r"\s*[-*]\s+\[([ xX])\]\s+(.+?)\s*", line) for line in lines]
+                if any(matches):
+                    invalid = any(match is None or match[2] not in item.options for match in matches)
+                    choices = [
+                        match[2] for match in matches if match is not None and match[1].casefold() == "x"
+                    ]
+                else:
+                    choices = [v.strip() for v in re.split(r"[、,，\n]", value) if v.strip()]
+                    invalid = any(v not in item.options for v in choices)
                 if invalid or len(choices) != len(set(choices)) or (item.required and not choices):
                     errors.append(f"{item.label}：复选项不合法或必选项未勾选")
         return errors
